@@ -1,0 +1,24 @@
+[
+  {
+    "id": "mmta-00001",
+    "type": "withdrawal",
+    "date": "2025-07-18 12:27:40",
+    "amount": "5000.00",
+    "agent": "LINA MMASY",
+    "fee": "1,004.00"
+  },
+  {
+    "id": "mmta-00001",
+    "type": "payment",
+    "date": "2025-07-18 12:27:40",
+    "amount": "7000.00",
+    "recipient": "DF INTERMEDIATE WALLET"
+  },
+  {
+    "id": "mmta-00001",
+    "type": "deposit",
+    "date": "2025-07-18 12:27:40",
+    "amount": "19000.00",
+    "sender": "TIGO - AHMED KIKUNGE"
+  }
+]

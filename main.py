@@ -1,103 +1,109 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import re
 import json
 import os
+from datetime import datetime
+from analytics import update_user_summary, get_ai_advice
 
 app = FastAPI()
 
 # Data model
 class SMSPayload(BaseModel):
+    user_id: str
     messages: List[str]
 
-# JSON file path
-DB_FILE = "transactions.json"
-
-# Regex patterns
+# Regex patterns (updated)
 patterns = {
-    "withdrawal": r"Withdrawn\s([\d,]+\.?\d*)\sTsh from Agent: ([A-Za-z\s]+)\. Fee\s([\d,]+\.?\d*)\sTsh",
+    "withdrawal": r"Withdrawn\s([\d,]+\.?\d*)\sTsh from Agent: (.+?)\. Fee ([\d,]+\.?\d*) Tsh",
     "payment": r"You have paid\s([\d,]+\.?\d*)\sTsh to (.+?)\.",
     "deposit": r"Received Tsh\s([\d,]+\.?\d*) from (.+?)\.",
     "loan_received": r"Received loan of Tsh\s([\d,]+\.?\d*)",
     "loan_repayment": r"You have repaid\s([\d,]+\.?\d*) Tsh",
     "airtime": r"Recharge successful.*?Tsh([\d,]+\.?\d*)",
+    "balance": r"Balance\sTsh\s([\d,]+\.?\d*)",
     "failed": r"Transaction failed"
 }
 
-def extract_date(message: str):
-    """
-    Extracts a date-like pattern from message.
-    Examples:
-    - CO250610.0910.N30664 -> 2025-06-10
-    - 18/07/2025
-    """
-    # Pattern ya siku/mwezi/mwaka
-    date_pattern = re.search(r"(\d{2}/\d{2}/\d{4})", message)
-    if date_pattern:
-        return date_pattern.group(1)
-    
-    # Pattern ya mfano: CO250610 (-> 2025-06-10)
-    code_pattern = re.search(r"[A-Z]{2}(\d{2})(\d{2})(\d{2})", message)
-    if code_pattern:
-        year = "20" + code_pattern.group(1)
-        month = code_pattern.group(2)
-        day = code_pattern.group(3)
-        return f"{year}-{month}-{day}"
-    
-    return None
+DATA_DIR = "data/users"
 
-# Load existing transactions
-def load_transactions():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f:
-            return json.load(f)
-    return []
+# Helper to generate transaction ID
+def generate_transaction_id(user_id):
+    folder = os.path.join(DATA_DIR, user_id)
+    os.makedirs(folder, exist_ok=True)
+    file_path = os.path.join(folder, "transactions.json")
 
-# Save transactions to JSON
-def save_transactions(transactions):
-    with open(DB_FILE, "w") as f:
-        json.dump(transactions, f, indent=4)
+    if not os.path.exists(file_path):
+        return "mmta-00001"
 
-# Generate unique ID
-def generate_transaction_id(transactions):
-    return f"mmta-{len(transactions) + 1:05d}"
+    with open(file_path, "r") as f:
+        data = json.load(f)
+    return f"mmta-{len(data) + 1:05d}"
 
-# Analyze message
-def analyze_message(message, transactions):
+# Analyze single message
+def analyze_message(message, user_id):
     for txn_type, pattern in patterns.items():
         match = re.search(pattern, message)
         if match:
-            result = {"id": generate_transaction_id(transactions), "type": txn_type}
-            
-            # Handle based on type
+            txn = {
+                "id": generate_transaction_id(user_id),
+                "type": txn_type,
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+
             if txn_type == "withdrawal":
-                result.update({
-                    "amount": match.group(1).replace(',', ''),
-                    "agent": match.group(2).strip(),
-                    "fee": match.group(3).replace(',', '')
-                })
-            elif txn_type in ["payment", "deposit"]:
-                result["amount"] = match.group(1).replace(',', '')
-                if len(match.groups()) > 1:
-                    recipient = match.group(2).strip()
-                    if txn_type == "payment":
-                        result["recipient"] = recipient
-                    else:
-                        result["sender"] = recipient
+                txn.update({"amount": match.group(1).replace(',', ''), "agent": match.group(2), "fee": match.group(3)})
+            elif txn_type == "payment":
+                txn.update({"amount": match.group(1).replace(',', ''), "recipient": match.group(2)})
+            elif txn_type == "deposit":
+                txn.update({"amount": match.group(1).replace(',', ''), "sender": match.group(2)})
+            elif txn_type == "loan_received":
+                txn.update({"amount": match.group(1).replace(',', '')})
+            elif txn_type == "loan_repayment":
+                txn.update({"amount": match.group(1).replace(',', '')})
+            elif txn_type == "airtime":
+                txn.update({"amount": match.group(1).replace(',', '')})
+            elif txn_type == "balance":
+                txn.update({"remaining_balance": match.group(1).replace(',', '')})
             else:
-                result["amount"] = match.group(1).replace(',', '') if match.groups() else None
+                txn.update({"amount": None})
 
-            # Add date if found
-            result["date"] = extract_date(message)
+            return txn
+    return {"id": generate_transaction_id(user_id), "type": "unknown", "amount": None, "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-            return result
-    return {"id": generate_transaction_id(transactions), "type": "unknown", "amount": None, "date": extract_date(message)}
+# Save transaction
+def save_transaction(user_id, transactions):
+    folder = os.path.join(DATA_DIR, user_id)
+    os.makedirs(folder, exist_ok=True)
+    file_path = os.path.join(folder, "transactions.json")
+
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            existing = json.load(f)
+    else:
+        existing = []
+
+    existing.extend(transactions)
+
+    with open(file_path, "w") as f:
+        json.dump(existing, f, indent=2)
+
+    return len(existing)
+
+@app.get("/")
+def root():
+    return {"message": "MMTA Backend V2 is running!", "endpoints": ["/analyze"]}
 
 @app.post("/analyze")
 def analyze_sms(data: SMSPayload):
-    transactions = load_transactions()
-    analysis = [analyze_message(msg, transactions) for msg in data.messages]
-    transactions.extend(analysis)
-    save_transactions(transactions)
-    return {"analysis": analysis, "total_transactions": len(transactions)}
+    transactions = [analyze_message(msg, data.user_id) for msg in data.messages]
+    save_transaction(data.user_id, transactions)
+    
+    # Update summaries
+    update_user_summary(data.user_id)
+
+    # Generate AI advice
+    advice = get_ai_advice(data.user_id)
+
+    return {"analysis": transactions, "advice": advice}
