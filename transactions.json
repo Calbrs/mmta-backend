@@ -1,0 +1,52 @@
+[
+    {
+        "id": "mmta-00001",
+        "type": "withdrawal",
+        "amount": "5000.00",
+        "agent": "LINA MMASY",
+        "fee": "1004.00",
+        "date": null
+    },
+    {
+        "id": "mmta-00001",
+        "type": "payment",
+        "amount": "7000.00",
+        "recipient": "DF INTERMEDIATE WALLET",
+        "date": null
+    },
+    {
+        "id": "mmta-00001",
+        "type": "deposit",
+        "amount": "19000.00",
+        "sender": "TIGO - AHMED KIKUNGE",
+        "date": null
+    },
+    {
+        "id": "mmta-00001",
+        "type": "loan_repayment",
+        "amount": "3399.00",
+        "date": null
+    },
+    {
+        "id": "mmta-00005",
+        "type": "withdrawal",
+        "amount": "5000.00",
+        "agent": "LINA MMASY",
+        "fee": "1004.00",
+        "date": "2025-06-10"
+    },
+    {
+        "id": "mmta-00005",
+        "type": "payment",
+        "amount": "7000.00",
+        "recipient": "DF INTERMEDIATE WALLET",
+        "date": null
+    },
+    {
+        "id": "mmta-00005",
+        "type": "deposit",
+        "amount": "19000.00",
+        "sender": "TIGO - AHMED KIKUNGE",
+        "date": null
+    }
+]
