@@ -1,24 +1,86 @@
 [
   {
-    "id": "mmta-00001",
-    "type": "withdrawal",
-    "date": "2025-07-18 12:27:40",
-    "amount": "5000.00",
-    "agent": "LINA MMASY",
-    "fee": "1,004.00"
-  },
-  {
-    "id": "mmta-00001",
-    "type": "payment",
-    "date": "2025-07-18 12:27:40",
-    "amount": "7000.00",
-    "recipient": "DF INTERMEDIATE WALLET"
-  },
-  {
-    "id": "mmta-00001",
     "type": "deposit",
-    "date": "2025-07-18 12:27:40",
-    "amount": "19000.00",
-    "sender": "TIGO - AHMED KIKUNGE"
+    "amount": "25000.00",
+    "raw": "BL43FPJ7J5D Confirmed. On 4/12/24, 1:22 PM Receive Tsh25,000.00 from HAWA AHMAD KYAMA New balance is Tsh27,293.00. Send or receive money to 200 countries.",
+    "service": "MPESA",
+    "date": "2025-07-19 16:21:29"
+  },
+  {
+    "type": "payment",
+    "amount": "26300.00",
+    "raw": "BL44FPJ9NTY Confirmed. Tsh26,300.00 sent to SELCOM DUKA DIRECT for account 63844931-9953916186 on 4/12/24 at 1:26 PM Total fee Tsh1,200.00 (M-Pesa fee Tsh1,200.00 + Government Levy Tsh0.00). Balance is Tsh1.00.",
+    "service": "MPESA",
+    "date": "2025-07-19 16:21:29"
+  },
+  {
+    "type": "deposit",
+    "amount": "15000.00",
+    "raw": "BL57FPX6EJ5 Confirmed. On 5/12/24, 9:09 AM Receive Tsh15,000.00 from REUBEN APOLINARY JOHN New balance is Tsh15,001.00. Send or receive money to 200 countries.",
+    "service": "MPESA",
+    "date": "2025-07-19 16:21:29"
+  },
+  {
+    "type": "repayment",
+    "amount": "229.00",
+    "raw": "BL54FPX6A3W Confirmed. Tsh229.00 has been deducted from your M-Pesa account on 5/12/24 at 9:10 AM as a repayment of M-Pesa Overdraft service. New M-Pesa balance is Tsh14,772.00.",
+    "service": "MPESA",
+    "date": "2025-07-19 16:21:29"
+  },
+  {
+    "type": "deposit",
+    "amount": "25000.00",
+    "raw": "BL43FPJ7J5D Confirmed. On 4/12/24, 1:22 PM Receive Tsh25,000.00 from HAWA AHMAD KYAMA New balance is Tsh27,293.00. Send or receive money to 200 countries.",
+    "service": "MPESA",
+    "date": "2025-07-19 18:37:55"
+  },
+  {
+    "type": "payment",
+    "amount": "26300.00",
+    "raw": "BL44FPJ9NTY Confirmed. Tsh26,300.00 sent to SELCOM DUKA DIRECT for account 63844931-9953916186 on 4/12/24 at 1:26 PM Total fee Tsh1,200.00 (M-Pesa fee Tsh1,200.00 + Government Levy Tsh0.00). Balance is Tsh1.00.",
+    "service": "MPESA",
+    "date": "2025-07-19 18:37:55"
+  },
+  {
+    "type": "deposit",
+    "amount": "15000.00",
+    "raw": "BL57FPX6EJ5 Confirmed. On 5/12/24, 9:09 AM Receive Tsh15,000.00 from REUBEN APOLINARY JOHN New balance is Tsh15,001.00. Send or receive money to 200 countries.",
+    "service": "MPESA",
+    "date": "2025-07-19 18:37:55"
+  },
+  {
+    "type": "repayment",
+    "amount": "229.00",
+    "raw": "BL54FPX6A3W Confirmed. Tsh229.00 has been deducted from your M-Pesa account on 5/12/24 at 9:10 AM as a repayment of M-Pesa Overdraft service. New M-Pesa balance is Tsh14,772.00.",
+    "service": "MPESA",
+    "date": "2025-07-19 18:37:55"
+  },
+  {
+    "type": "amount",
+    "amount": "5000",
+    "raw": "BL57FQ2J06J Confirmed. AHMED KIKUNGE has received Tsh 5000 on 05-DEC-24 14:23:18.843.",
+    "service": "MPESA",
+    "date": "2025-07-19 18:37:55"
+  },
+  {
+    "type": "transaction_id",
+    "amount": null,
+    "raw": "BL57FQ2J06J Confirmed. Tsh5,000.00 sent to TIPS-AIRTELMONEY for account 255783386973 on 5/12/24 at 2:23 PM Total fee Tsh180.00 (M-Pesa fee Tsh180.00 + Government Levy Tsh0.00). Balance is Tsh9,592.00.",
+    "service": "AirtelMoney",
+    "date": "2025-07-19 18:37:55"
+  },
+  {
+    "type": "transaction_id",
+    "amount": null,
+    "raw": "BL69FQHNZOT confirmed. You bought Tsh2,100.00 of airtime for AIRTEL-255698019364, on 6/12/24 11:43 AM. New balance is Tsh5,447.00.",
+    "service": "AirtelMoney",
+    "date": "2025-07-19 18:37:55"
+  },
+  {
+    "type": "payment",
+    "amount": "1000.00",
+    "raw": "BL61FQRM9A7 Confirmed. Tsh1,000.00 sent to business J4U M-PESA on 6/12/24 at 8:02 PM. New M-Pesa balance is Tsh4,447.00.",
+    "service": "MPESA",
+    "date": "2025-07-19 18:37:55"
   }
 ]
