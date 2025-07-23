@@ -1,42 +1,92 @@
 {
   "AirtelMoney": {
-    "withdrawal": "Withdrawn\\s([\\d,]+\\.?\\d*)\\sTsh from Agent:\\s(.+?)\\. Fee\\s([\\d,]+\\.?\\d*)",
-    "deposit": "Received Tsh\\s([\\d,]+\\.?\\d*) from (.+?)\\.",
-    "payment": "You have paid\\s([\\d,]+\\.?\\d*)\\sTsh to (.+?)\\.",
-    "airtime": "Recharge successful.*?Tsh([\\d,]+\\.?\\d*)",
-    "transaction_id": "\\b[A-Z0-9]+\\b",
-    "status": "Confirmed",
-    "amount_sent": "Tsh\\d+(\\.\\d{2})?",
-    "recipient": "TIPS-AIRTELMONEY",
-    "recipient_account": "\\d+",
-    "date": "\\d{1,2}/\\d{1,2}/\\d{2}",
-    "time": "\\d{1,2}:\\d{2} (?:AM|PM)",
-    "total_fee": "Tsh\\d+(\\.\\d{2})?",
-    "mpesa_fee": "Tsh\\d+(\\.\\d{2})?",
-    "government_levy": "Tsh\\d+(\\.\\d{2})?",
-    "balance": "Tsh\\d+(\\.\\d{2})?",
-    "currency": "Tsh"
+    "transaction_id": "TID[:\\s]*([A-Z0-9.]+)",
+    "date_time": "(\\d{2,4}[-/]\\d{1,2}[-/]\\d{1,2}[\\sT]\\d{1,2}:\\d{2}(?::\\d{2})?)",
+    "transaction_type": "(Received|Paid|Withdrawn|Sent|Loan|Deposit|Purchase)",
+    "amount": "(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)\\s*Tsh",
+    "currency": "(Tsh|TZS)",
+    "charges": {
+      "total": "Charges\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+      "service_charge": "Service\\scharge\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+      "gov_levy": "Govt\\sLevy\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)"
+    },
+    "net_amount": "Net\\s*Amount\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+    "previous_balance": "Previous\\s*Balance\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+    "balance_after": "Balance\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+    "recipient": {
+      "name": "from\\s+([A-Za-z ]+)",
+      "phone_number": "(\\d{9,12})",
+      "agent_id": "Agent\\sID[:\\s]*([A-Z0-9]+)"
+    },
+    "service_reference": "Ref[:\\s]*([A-Z0-9]+)",
+    "service_provider": "(Airtel)",
+    "channel": "(USSD|App|Agent|POS)",
+    "payment_method": "(Cash|Wallet|Card)",
+    "location": "Location[:\\s]*([A-Za-z ]+)",
+    "status": "(Successful|Failed|Pending|Declined)",
+    "transaction_relation": "Relation[:\\s]*([A-Za-z0-9]+)",
+    "user_reference_note": "Note[:\\s]*(.+)",
+    "promotions_bonus": "Bonus[:\\s]*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+    "auth_method": "(PIN|OTP|Fingerprint)"
   },
   "MPESA": {
-    "deposit": "Receive Tsh([\\d,]+\\.?\\d*) from (.+?)",
-    "payment": "Tsh([\\d,]+\\.?\\d*) sent to (.+?)",
-    "repayment": "Tsh([\\d,]+\\.?\\d*).*?repayment",
-    "airtime": "You bought Tsh([\\d,]+\\.?\\d*) of airtime for (.+?),",
-    "transaction_id": "^BL\\d{6}[A-Z0-9]{4}$",
-    "confirmation_status": "^Confirmed$",
-    "recipient_name": "^[A-Z ]+$",
-    "amount": "Tsh (\\d+)",
-    "currency": "^Tsh$",
-    "date": "\\d{2}-\\w{3}-\\d{2}",
-    "time": "\\d{2}:\\d{2}:\\d{2}\\.\\d{3}"
+    "transaction_id": "Trans ID[:\\s]*([A-Z0-9]+)",
+    "date_time": "(\\d{2,4}/\\d{1,2}/\\d{1,2}\\s\\d{1,2}:\\d{2})",
+    "transaction_type": "(Received|Sent|Withdrawn|Paid|Deposit|Loan|Purchase)",
+    "amount": "(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)\\s*Tsh",
+    "currency": "(Tsh|TZS)",
+    "charges": {
+      "total": "Charges[:\\s]*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+      "service_charge": "Service charge[:\\s]*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+      "gov_levy": "Govt levy[:\\s]*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)"
+    },
+    "net_amount": "Net Amount[:\\s]*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+    "previous_balance": "Previous Balance[:\\s]*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+    "balance_after": "New Balance[:\\s]*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+    "recipient": {
+      "name": "to\\s+([A-Za-z ]+)",
+      "phone_number": "(\\d{9,12})",
+      "agent_id": "Agent[:\\s]*([A-Z0-9]+)"
+    },
+    "service_reference": "Ref[:\\s]*([A-Z0-9]+)",
+    "service_provider": "(M-Pesa|Mpesa)",
+    "channel": "(USSD|App|Agent|POS|ATM)",
+    "payment_method": "(Cash|Wallet|Card)",
+    "location": "Location[:\\s]*([A-Za-z ]+)",
+    "status": "(Successful|Failed|Pending|Declined)",
+    "transaction_relation": "Relation[:\\s]*([A-Za-z0-9]+)",
+    "user_reference_note": "Note[:\\s]*(.+)",
+    "promotions_bonus": "Bonus[:\\s]*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+    "auth_method": "(PIN|OTP|Fingerprint)"
   },
-  "MIXX": {
-    "payment": "Malipo yamekamilika\\. Kiasi Tsh([\\d,]+)\\.",
-    "received": "Umepokea TSh ([\\d,]+) kutoka kwa (.+?), Salio lako jipya ni TSh ([\\d,]+)\\."
-  },
-  "AI_Learned": {
-    "type": "BL72FR1Y578.*successfully loaded",
-    "amount": "TSH\\s*(\\d+)",
-    "currency": "TSH"
+  "TIGO": {
+    "transaction_id": "Ref[:\\s]*([A-Z0-9]+)",
+    "date_time": "(\\d{2,4}-\\d{1,2}-\\d{1,2}\\s\\d{1,2}:\\d{2}(?::\\d{2})?)",
+    "transaction_type": "(Received|Sent|Withdrawn|Paid|Deposit|Loan|Purchase)",
+    "amount": "Umepokea Tshs (\\d+(?:,\\d+)?)\\.",
+    "currency": "(Tsh|TZS)",
+    "charges": {
+      "total": "Charges\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+      "service_charge": "Service\\scharge\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+      "gov_levy": "Govt\\sLevy\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)"
+    },
+    "net_amount": "Net\\s*Amount\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+    "previous_balance": "Previous\\s*Balance\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+    "balance_after": "Balance\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+    "recipient": {
+      "name": "from\\s+([A-Za-z ]+)",
+      "phone_number": "(\\d{9,12})",
+      "agent_id": "Agent\\sID[:\\s]*([A-Z0-9]+)"
+    },
+    "service_reference": "Ref[:\\s]*([A-Z0-9]+)",
+    "service_provider": "(Tigo|Mixx)",
+    "channel": "(USSD|App|Agent|POS)",
+    "payment_method": "(Cash|Wallet|Card)",
+    "location": "Location[:\\s]*([A-Za-z ]+)",
+    "status": "(Successful|Failed|Pending|Declined)",
+    "transaction_relation": "Relation[:\\s]*([A-Za-z0-9]+)",
+    "user_reference_note": "Note[:\\s]*(.+)",
+    "promotions_bonus": "Bonus[:\\s]*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
+    "auth_method": "(PIN|OTP|Fingerprint)"
   }
 }
