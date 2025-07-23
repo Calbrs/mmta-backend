@@ -17,7 +17,7 @@ app = FastAPI(title="MMTA Backend V9 - AI Auto-Learning Patterns")
 
 # --------- CORS ---------
 origins = [
-    "https://calcue.wuaze.com/",
+    "https://calcue.wuaze.com",
     "http://localhost",
     "http://127.0.0.1",
     "http://localhost:8000",
