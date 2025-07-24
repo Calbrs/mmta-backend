@@ -75,24 +75,31 @@ def try_float(value: Optional[str]) -> Optional[float]:
 def detect_service(msg: str) -> str:
     """
     Detects the service (e.g., MPESA, AirtelMoney, TIGO) based on the message content.
-    Prioritizes specific MPESA confirmation pattern.
+    Prioritizes specific MPESA confirmation pattern and adds TIGO regex.
     """
     lower = msg.lower()
 
+    # --------- MPESA detection ---------
     # Specific check for MPESA confirmation message format:
-    # Starts with alphanumeric ID followed by "(imethibitishwa)" or "(Confirmed)"
-    # Example: "BLT0G2E6RSW (imethibitishwa)" or "BLT0G2E6RSW Confirmed"
     mpesa_specific_pattern = r"^[A-Z0-9]+\s+\(?(?:imethibitishwa|Confirmed)\)?\s*"
     if re.search(mpesa_specific_pattern, msg, re.IGNORECASE):
         return "MPESA"
 
-    # General keyword-based detection (fallback)
+    # General keyword-based MPESA detection
+    if "mpesa" in lower:
+        return "MPESA"
+
+    # --------- AIRTEL detection ---------
     if "airtel" in lower:
         return "AirtelMoney"
-    if "mpesa" in lower: # Keep this for other MPESA messages not matching the specific pattern
-        return "MPESA"
-    if "tigo" in lower or "mixx" in lower:
+
+    # --------- TIGO detection ---------
+    # Specific pattern for TIGO messages with TID and "Received Tsh..."
+    # Example: "Received Tsh 45,000.00 from VODACOM - AMIMU KILOMONI - 754473460. Balance Tsh 46,602.25. TID:CI250517.2058.Y29364"
+    tigo_pattern = r"TID[:\s]*([A-Z0-9.]+)"  
+    if re.search(tigo_pattern, msg, re.IGNORECASE) or "tigo" in lower:
         return "TIGO"
+
     return "Unknown"
 
 def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
