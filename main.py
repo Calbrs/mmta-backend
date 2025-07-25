@@ -5,8 +5,6 @@ import logging
 from datetime import datetime
 from collections import defaultdict
 from typing import List, Dict, Any, Optional
-
-import httpx # Maktaba mpya ya HTTP
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -14,7 +12,7 @@ from pydantic import BaseModel
 # --------- LOGGING ---------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-app = FastAPI(title="MMTA Backend V10 - PHP API Integration")
+app = FastAPI(title="MMTA Backend V9 - Manual Pattern Learning")
 
 # --------- CORS ---------
 origins = [
@@ -34,17 +32,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------- PATHS & API CONFIG ---------
+# --------- PATHS ---------
 DATA_DIR = "data"
+USER_DATA_DIR = os.path.join(DATA_DIR, "users")
 PATTERNS_FILE = os.path.join(DATA_DIR, "patterns.json")
-PHP_API_URL = "https://calcue.wuaze.com/mmta_api.php" # URL ya API yako
 
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(USER_DATA_DIR, exist_ok=True)
 
-# Tumia AsyncClient kwa ufanisi zaidi na FastAPI
-http_client = httpx.AsyncClient(timeout=10.0)
-
-# --------- LOAD & SAVE UTILITIES (Local for Patterns) ---------
+# --------- LOAD & SAVE UTILITIES ---------
 def load_json(file_path: str) -> Dict[str, Any]:
     """Loads JSON data from a specified file path."""
     if os.path.exists(file_path):
@@ -56,79 +52,61 @@ def load_json(file_path: str) -> Dict[str, Any]:
             return {}
     return {}
 
-# Load patterns from local patterns.json
+def save_json(data: Dict[str, Any], file_path: str):
+    """Saves data as JSON to a specified file path."""
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except IOError as e:
+        logging.error(f"Failed to write to {file_path}: {e}")
+
+# Load patterns from patterns.json
 patterns = load_json(PATTERNS_FILE)
 
-# --------- API INTERACTION FUNCTIONS (NEW) ---------
-async def check_user_exists(user_id: str) -> bool:
-    """
-    Checks if a user exists by calling the PHP API.
-    NOTE: Requires the 'check_user' action on the PHP side.
-    """
-    params = {"action": "check_user", "user_id": user_id}
-    try:
-        response = await http_client.get(PHP_API_URL, params=params)
-        response.raise_for_status() # Raise exception for 4xx/5xx errors
-        data = response.json()
-        return data.get("exists", False)
-    except (httpx.RequestError, json.JSONDecodeError) as e:
-        logging.error(f"Error checking user {user_id}: {e}")
-        return False
-
-async def load_transactions_from_api(user_id: str) -> List[Dict[str, Any]]:
-    """Loads all transactions for a specific user from the PHP API."""
-    params = {"action": "get_transactions", "user_id": user_id}
-    try:
-        response = await http_client.get(PHP_API_URL, params=params)
-        response.raise_for_status()
-        transactions = response.json()
-        # API inarudisha string kwa baadhi ya namba, tunazibadilisha
-        for t in transactions:
-            if 'amount' in t and t['amount']:
-                t['amount'] = try_float(t['amount'])
-        return transactions
-    except (httpx.RequestError, json.JSONDecodeError) as e:
-        logging.error(f"Failed to load transactions for user {user_id}: {e}")
-        return []
-
-async def save_transaction_to_api(transaction: Dict[str, Any]) -> Dict[str, Any]:
-    """Saves a parsed transaction for a specific user via the PHP API."""
-    params = {"action": "save_transaction"}
-    # Hakikisha 'user_id' ipo kwenye data ya transaction
-    if "user_id" not in transaction:
-        return {"status": "error", "message": "user_id is missing."}
-    
-    try:
-        response = await http_client.post(PHP_API_URL, params=params, json=transaction)
-        response.raise_for_status()
-        return response.json()
-    except httpx.RequestError as e:
-        logging.error(f"Failed to save transaction: {e}")
-        return {"status": "error", "message": "API connection failed."}
-
-# --------- UTILS (No changes needed here) ---------
+# --------- UTILS ---------
 def try_float(value: Optional[str]) -> Optional[float]:
     """Attempts to convert a string to a float, cleaning non-numeric characters first."""
     try:
-        return float(re.sub(r'[^\d.]', '', str(value))) if value else None
-    except (ValueError, TypeError):
+        # Remove any characters that are not digits or a decimal point
+        return float(re.sub(r'[^\d.]', '', value)) if value else None
+    except ValueError:
         return None
 
 def detect_service(msg: str) -> str:
+    """
+    Detects the service (e.g., MPESA, AirtelMoney, TIGO) based on the message content.
+    Prioritizes specific MPESA confirmation pattern and adds TIGO regex.
+    """
     lower = msg.lower()
+
+    # --------- MPESA detection ---------
+    # Specific check for MPESA confirmation message format:
     mpesa_specific_pattern = r"^[A-Z0-9]+\s+\(?(?:imethibitishwa|Confirmed)\)?\s*"
     if re.search(mpesa_specific_pattern, msg, re.IGNORECASE):
         return "MPESA"
+
+    # General keyword-based MPESA detection
     if "mpesa" in lower:
         return "MPESA"
+
+    # --------- AIRTEL detection ---------
     if "airtel" in lower:
         return "AirtelMoney"
-    tigo_pattern = r"TID[:\s]*([A-Z0-9.]+)"
+
+    # --------- TIGO detection ---------
+    # Specific pattern for TIGO messages with TID and "Received Tsh..."
+    # Example: "Received Tsh 45,000.00 from VODACOM - AMIMU KILOMONI - 754473460. Balance Tsh 46,602.25. TID:CI250517.2058.Y29364"
+    tigo_pattern = r"TID[:\s]*([A-Z0-9.]+)"  
     if re.search(tigo_pattern, msg, re.IGNORECASE) or "tigo" in lower:
         return "TIGO"
+
     return "Unknown"
 
 def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
+    """
+    Parses the message by trying to extract all fields via the patterns dict for a specific service.
+    Filters out null, empty, or 'Unknown' values to return only meaningful data.
+    """
     service_patterns = patterns.get(service)
     if not service_patterns:
         logging.warning(f"No patterns found for service: {service}")
@@ -136,179 +114,267 @@ def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
 
     extracted_data = {}
     try:
-        def extract_and_clean(regex_pattern, message):
-            if not regex_pattern: return None
+        # Helper to extract and clean values from a regex match
+        def extract_and_clean(regex_pattern, message, default_value=""):
+            if not regex_pattern: # Handle cases where a specific pattern might be missing for a service
+                return None
             match = re.search(regex_pattern, message, re.IGNORECASE)
-            value = match.group(1).strip() if match and match.group(1) else None
-            return value if value and value.lower() != "unknown" else None
+            value = match.group(1).strip() if match and match.group(1) else default_value
+            # Filter out empty strings, "Unknown", or default empty values
+            return value if value and value.lower() != "unknown" and value != default_value else None
 
+        # Extract simple fields
         extracted_data["transaction_id"] = extract_and_clean(service_patterns.get("transaction_id"), msg)
         extracted_data["date_time"] = extract_and_clean(service_patterns.get("date_time"), msg)
         extracted_data["transaction_type"] = extract_and_clean(service_patterns.get("transaction_type"), msg)
         
         amount_str = extract_and_clean(service_patterns.get("amount"), msg)
-        extracted_data["amount"] = try_float(amount_str)
+        extracted_data["amount"] = try_float(amount_str) if amount_str else None
+        
+        extracted_data["currency"] = extract_and_clean(service_patterns.get("currency"), msg)
+        
+        net_amount_str = extract_and_clean(service_patterns.get("net_amount"), msg)
+        extracted_data["net_amount"] = try_float(net_amount_str) if net_amount_str else None
+        
+        previous_balance_str = extract_and_clean(service_patterns.get("previous_balance"), msg)
+        extracted_data["previous_balance"] = try_float(previous_balance_str) if previous_balance_str else None
+        
+        balance_after_str = extract_and_clean(service_patterns.get("balance_after"), msg)
+        extracted_data["balance_after"] = try_float(balance_after_str) if balance_after_str else None
+        
+        extracted_data["service_reference"] = extract_and_clean(service_patterns.get("service_reference"), msg)
+        extracted_data["service_provider"] = extract_and_clean(service_patterns.get("service_provider"), msg)
+        extracted_data["channel"] = extract_and_clean(service_patterns.get("channel"), msg)
+        extracted_data["payment_method"] = extract_and_clean(service_patterns.get("payment_method"), msg)
+        extracted_data["location"] = extract_and_clean(service_patterns.get("location"), msg)
+        extracted_data["status"] = extract_and_clean(service_patterns.get("status"), msg)
+        extracted_data["transaction_relation"] = extract_and_clean(service_patterns.get("transaction_relation"), msg)
+        extracted_data["user_reference_note"] = extract_and_clean(service_patterns.get("user_reference_note"), msg)
+        
+        promotions_bonus_str = extract_and_clean(service_patterns.get("promotions_bonus"), msg)
+        extracted_data["promotions_bonus"] = try_float(promotions_bonus_str) if promotions_bonus_str else None
+        
+        extracted_data["auth_method"] = extract_and_clean(service_patterns.get("auth_method"), msg)
+        extracted_data["phone_number"] = extract_and_clean(service_patterns.get("phone_number"), msg)
+        extracted_data["participant"] = extract_and_clean(service_patterns.get("participant"), msg)
 
-        # ... (rest of the parsing logic remains the same) ...
-        # For brevity, the rest of the parsing logic is omitted as it doesn't change.
-        # Ensure all fields from the original function are here.
+
+        # Extract charges dict
+        charges_data = {}
+        charges_patterns = service_patterns.get("charges", {})
+        charges_total_str = extract_and_clean(charges_patterns.get("total"), msg)
+        charges_data["total"] = try_float(charges_total_str) if charges_total_str else None
+        
+        charges_service_charge_str = extract_and_clean(charges_patterns.get("service_charge"), msg)
+        charges_data["service_charge"] = try_float(charges_service_charge_str) if charges_service_charge_str else None
+        
+        charges_gov_levy_str = extract_and_clean(charges_patterns.get("gov_levy"), msg)
+        charges_data["gov_levy"] = try_float(charges_gov_levy_str) if charges_gov_levy_str else None
+        
+        # Only add charges if any sub-field has a value
+        if any(v is not None for v in charges_data.values()):
+            extracted_data["charges"] = charges_data
+        else:
+            extracted_data["charges"] = {} # Or omit entirely if you prefer
+
+        # Extract recipient dict
+        recipient_data = {}
+        recipient_patterns = service_patterns.get("recipient", {})
+        recipient_data["name"] = extract_and_clean(recipient_patterns.get("name"), msg)
+        recipient_data["phone_number"] = extract_and_clean(recipient_patterns.get("phone_number"), msg)
+        recipient_data["agent_id"] = extract_and_clean(recipient_patterns.get("agent_id"), msg)
+
+        # Only add recipient if any sub-field has a value
+        if any(v is not None for v in recipient_data.values()):
+            extracted_data["recipient"] = recipient_data
+        else:
+            extracted_data["recipient"] = {} # Or omit entirely if you prefer
 
         extracted_data["service"] = service
         extracted_data["raw"] = msg
 
+        # Final filtering: remove keys with None or empty string values
+        # This will iterate over all extracted_data and its nested dictionaries
         def clean_dict(d):
-            if not isinstance(d, dict): return d
-            return {k: clean_dict(v) for k, v in d.items() if v is not None and v != "" and v != {}}
+            return {k: v for k, v in d.items() if v is not None and v != "" and (not isinstance(v, dict) or clean_dict(v))}
 
         cleaned_result = clean_dict(extracted_data)
-        return cleaned_result if cleaned_result else None
+        
+        return cleaned_result if cleaned_result else None # Return None if nothing was extracted
+
     except re.error as e:
         logging.error(f"Regex error in parse_with_patterns for service {service}: {e}")
         return None
 
-# --------- USER DATA (Updated to use API) ---------
-async def update_user_summary(user_id: str) -> Dict[str, Any]:
-    """Calculates summary from transactions loaded from the API."""
-    transactions = await load_transactions_from_api(user_id)
-    daily, weekly, monthly = defaultdict(float), defaultdict(float), defaultdict(float)
+# --------- USER DATA ---------
+def save_transaction(user_id: str, transaction: Dict[str, Any]):
+    """Saves a parsed transaction for a specific user."""
+    user_dir = os.path.join(USER_DATA_DIR, user_id)
+    os.makedirs(user_dir, exist_ok=True)
+    path = os.path.join(user_dir, "transactions.json")
+    transactions = load_transactions(user_id)
+    transactions.append(transaction)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(transactions, f, indent=2)
+
+def load_transactions(user_id: str) -> List[Dict[str, Any]]:
+    """Loads all transactions for a specific user."""
+    path = os.path.join(USER_DATA_DIR, user_id, "transactions.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        logging.error(f"JSON decode error in user transactions for {user_id}. Returning empty list.")
+        return []
+
+def save_summary(user_id: str, summary: Dict[str, Any]):
+    """Saves the spending summary for a specific user."""
+    user_dir = os.path.join(USER_DATA_DIR, user_id)
+    os.makedirs(user_dir, exist_ok=True)
+    path = os.path.join(user_dir, "summary.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+def update_user_summary(user_id: str) -> Dict[str, Any]:
+    """Calculates and updates daily, weekly, and monthly spending summaries for a user."""
+    transactions = load_transactions(user_id)
+    daily = defaultdict(float)
+    weekly = defaultdict(float)
+    monthly = defaultdict(float)
 
     for t in transactions:
         if not t.get("amount") or not t.get("date_time"):
             continue
         try:
             amount = float(t["amount"])
-            dt_str = t["date_time"]
-            # Flexible date parsing
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%d/%m/%y %H:%M", "%d-%m-%Y %H:%M:%S"):
-                try:
-                    dt = datetime.strptime(dt_str, fmt)
-                    break
-                except ValueError:
-                    pass
-            else:
-                logging.warning(f"Could not parse date: {dt_str}")
-                continue
-            
+            # Ensure the date_time format matches what's stored
+            dt = datetime.strptime(t["date_time"], "%Y-%m-%d %H:%M:%S")
             daily[dt.strftime("%Y-%m-%d")] += amount
             weekly[f"week_{dt.strftime('%U_%Y')}"] += amount
             monthly[dt.strftime("%B_%Y")] += amount
         except (ValueError, TypeError):
-            logging.warning(f"Could not process transaction for summary: {t}")
+            logging.warning(f"Could not process transaction for summary due to invalid amount or date_time: {t}")
             continue
 
-    return {"daily": dict(daily), "weekly": dict(weekly), "monthly": dict(monthly)}
+    summary = {"daily": dict(daily), "weekly": dict(weekly), "monthly": dict(monthly)}
+    save_summary(user_id, summary)
+    return summary
 
-def get_manual_advice(summary: Dict[str, Any]) -> str:
-    """Provides simple advice based on a pre-calculated summary."""
-    if not summary.get("weekly"):
+def get_manual_advice(user_id: str) -> str:
+    """Provides simple, non-AI financial advice based on user's spending summary."""
+    summary_path = os.path.join(USER_DATA_DIR, user_id, "summary.json")
+    if not os.path.exists(summary_path):
         return "Hakuna data ya kutosha kutoa ushauri."
-    
-    try:
-        latest_week_key = sorted(
-            summary["weekly"].keys(), 
-            key=lambda x: (int(x.split('_')[2]), int(x.split('_')[1])), 
-            reverse=True
-        )[0]
-        latest_week_spending = summary["weekly"][latest_week_key]
-    except (IndexError, ValueError):
-        return "Bado hatuna data ya kutosha ya matumizi wiki hii."
 
-    if latest_week_spending > 100000:
-        return f"Wiki hii umetumia {latest_week_spending:,.2f} TZS. Jaribu kupunguza matumizi."
-    elif latest_week_spending > 0:
-        return "Matumizi yako wiki hii yako sawa. Endelea kudhibiti gharama zako."
+    with open(summary_path, "r", encoding="utf-8") as f:
+        summary = json.load(f)
+
+    if summary.get("weekly"):
+        try:
+            # Sort weekly keys to get the most recent week's spending
+            latest_week_key = sorted(summary["weekly"].keys(), key=lambda x: (int(x.split('_')[2]), int(x.split('_')[1])), reverse=True)[0]
+            latest_week_spending = summary["weekly"][latest_week_key]
+        except (IndexError, ValueError):
+            return "Bado hatuna data ya kutosha ya matumizi wiki hii."
+
+        if latest_week_spending > 100000:
+            return f"Wiki hii umetumia {latest_week_spending:,.2f} TZS. Jaribu kupunguza matumizi."
+        elif latest_week_spending > 0:
+            return "Matumizi yako wiki hii yako sawa. Endelea kudhibiti gharama zako."
 
     return "Bado hatuna data ya kutosha ya matumizi wiki hii."
 
-# --------- MAIN ANALYSIS (Updated with user check) ---------
+
+# --------- MAIN ANALYSIS ---------
 class SMSPayload(BaseModel):
     user_id: str
     messages: List[str]
 
-async def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
+def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
     """
-    Analyzes a single message after verifying the user exists via API.
+    Analyzes a single SMS message, detects service, parses it using stored patterns,
+    and saves the transaction if successful.
     """
-    # **STEP 1: Check if user exists in the database via API**
-    user_is_valid = await check_user_exists(user_id)
-    if not user_is_valid:
-        logging.warning(f"Analysis blocked: User '{user_id}' does not exist in the system.")
-        return {"success": False, "error": f"Mtumiaji '{user_id}' hayupo kwenye mfumo."}
-
-    # **STEP 2: Proceed with parsing if user is valid**
     service = detect_service(msg)
     parsed = parse_with_patterns(msg, service)
 
     if parsed:
-        parsed["user_id"] = user_id # Add user_id to the data to be saved
-        api_response = await save_transaction_to_api(parsed)
-        if api_response.get("status") == "success":
-            return {"success": True, "source": "api_database", "data": parsed}
-        else:
-            return {"success": False, "error": f"API failed to save transaction: {api_response.get('message')}"}
+        save_transaction(user_id, parsed)
+        return {"success": True, "source": "local", "data": parsed}
     else:
         logging.info(f"Failed to parse message: '{msg}' with service '{service}'.")
         return {"success": False, "error": "Failed to parse message using available patterns."}
 
-# --------- API ROUTES (Updated to be async) ---------
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Close the HTTP client on application shutdown."""
-    await http_client.aclose()
-
+# --------- API ROUTES ---------
 @app.get("/")
 def root():
-    return {"message": "MMTA Backend V10 - PHP API Integration"}
+    """Root endpoint for the MMTA Backend."""
+    return {"message": "MMTA Backend V9 - Manual Pattern Learning + User Summary"}
 
 @app.post("/analyze")
-async def analyze_sms(payload: SMSPayload):
+def analyze_sms(payload: SMSPayload):
     """
-    Analyzes messages, updates summary from API, and provides advice.
+    Analyzes a list of SMS messages for a given user, updates their summary,
+    and provides financial advice.
     """
-    # Create a list of analysis tasks to run concurrently
-    analysis_tasks = [analyze_message(msg, payload.user_id) for msg in payload.messages]
-    results = await asyncio.gather(*analysis_tasks)
-    
-    # Update summary only if there were successful analyses
-    if any(r.get("success") for r in results):
-        summary = await update_user_summary(payload.user_id)
-        advice = get_manual_advice(summary)
-    else:
-        summary = {}
-        advice = "Hakuna miamala mipya iliyochakatwa."
-
+    results = [analyze_message(msg, payload.user_id) for msg in payload.messages]
+    summary = update_user_summary(payload.user_id)
     return {
         "analysis": results,
         "summary": summary,
-        "advice": advice,
+        "advice": get_manual_advice(payload.user_id), # Using manual advice
         "total_messages_processed": len(payload.messages)
     }
 
 @app.get("/patterns")
 def get_all_patterns():
+    """Returns all loaded patterns."""
     return {"patterns": patterns}
-    
+
+@app.get("/service-names")
+def get_service_names():
+    """Returns a list of all detected service names from patterns.json."""
+    data = load_json(PATTERNS_FILE)
+    return {"service_names": list(data.keys())}
+
+@app.get("/service-names/{service_name}")
+def get_service_patterns(service_name: str):
+    """Returns patterns for a specific service name."""
+    data = load_json(PATTERNS_FILE)
+    if service_name not in data:
+        raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found.")
+    return {service_name: data[service_name]}
+
+@app.get("/user-summary/{user_id}")
+def get_user_summary(user_id: str):
+    """Returns the spending summary for a specific user."""
+    summary_path = os.path.join(USER_DATA_DIR, user_id, "summary.json")
+    if not os.path.exists(summary_path):
+        raise HTTPException(status_code=404, detail="User summary not found.")
+    with open(summary_path, "r", encoding="utf-8") as f:
+        return json.load(f) 
+
 @app.get("/user-transactions/{user_id}")
-async def get_user_transactions(user_id: str):
-    transactions = await load_transactions_from_api(user_id)
+def get_user_transactions(user_id: str): 
+    """Returns all stored transactions for a specific user."""
+    transactions = load_transactions(user_id)
     if not transactions:
         raise HTTPException(status_code=404, detail="No transactions found for this user.")
     return {"transactions": transactions}
 
-@app.get("/user-summary/{user_id}")
-async def get_user_summary(user_id: str):
-    """Returns the spending summary for a specific user, calculated on-demand."""
-    summary = await update_user_summary(user_id)
-    if not any(summary.values()):
-        raise HTTPException(status_code=404, detail="User summary not found or no data available.")
-    return summary
+@app.post("/user-transactions/{user_id}")
+def save_user_transaction(user_id: str, transaction: Dict[str, Any]):
+    """Manually saves a transaction for a specific user."""
+    if not transaction:
+        raise HTTPException(status_code=400, detail="Transaction data is required.")
+    save_transaction(user_id, transaction)
+    return {"status": "success", "message": "Transaction saved successfully."}
 
 @app.get("/user-advice/{user_id}")
-async def get_user_advice(user_id: str):
+def get_user_advice(user_id: str):
     """Returns financial advice for a specific user."""
-    summary = await update_user_summary(user_id)
-    advice = get_manual_advice(summary)
+    advice = get_manual_advice(user_id) # Calling the manual advice function
     return {"advice": advice}
 
-# Import asyncio for the /analyze endpoint
-import asyncio
