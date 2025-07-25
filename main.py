@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import requests # Import the requests library
 
 # --------- LOGGING ---------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,7 +21,7 @@ origins = [
     "http://localhost",
     "http://127.0.0.1",
     "http://localhost:8000",
-    "http://127.0.0.1:8000",
+    "http://127.00.1:8000",
     "null"
 ]
 
@@ -32,15 +33,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------- PATHS ---------
+# --------- PATHS (Still relevant for patterns.json, but not user data) ---------
 DATA_DIR = "data"
-USER_DATA_DIR = os.path.join(DATA_DIR, "users")
 PATTERNS_FILE = os.path.join(DATA_DIR, "patterns.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(USER_DATA_DIR, exist_ok=True)
 
-# --------- LOAD & SAVE UTILITIES ---------
+# --------- PHP API URL ---------
+# Hii ndio URL ya API yako ya PHP
+PHP_API_URL = "https://calcue.wuaze.com/mmta_api.php"
+
+# --------- LOAD & SAVE UTILITIES (for patterns.json only) ---------
 def load_json(file_path: str) -> Dict[str, Any]:
     """Loads JSON data from a specified file path."""
     if os.path.exists(file_path):
@@ -51,14 +54,6 @@ def load_json(file_path: str) -> Dict[str, Any]:
             logging.error(f"JSON decode error in {file_path}: {e}")
             return {}
     return {}
-
-def save_json(data: Dict[str, Any], file_path: str):
-    """Saves data as JSON to a specified file path."""
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except IOError as e:
-        logging.error(f"Failed to write to {file_path}: {e}")
 
 # Load patterns from patterns.json
 patterns = load_json(PATTERNS_FILE)
@@ -95,7 +90,6 @@ def detect_service(msg: str) -> str:
 
     # --------- TIGO detection ---------
     # Specific pattern for TIGO messages with TID and "Received Tsh..."
-    # Example: "Received Tsh 45,000.00 from VODACOM - AMIMU KILOMONI - 754473460. Balance Tsh 46,602.25. TID:CI250517.2058.Y29364"
     tigo_pattern = r"TID[:\s]*([A-Z0-9.]+)"  
     if re.search(tigo_pattern, msg, re.IGNORECASE) or "tigo" in lower:
         return "TIGO"
@@ -158,7 +152,6 @@ def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
         extracted_data["phone_number"] = extract_and_clean(service_patterns.get("phone_number"), msg)
         extracted_data["participant"] = extract_and_clean(service_patterns.get("participant"), msg)
 
-
         # Extract charges dict
         charges_data = {}
         charges_patterns = service_patterns.get("charges", {})
@@ -171,11 +164,10 @@ def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
         charges_gov_levy_str = extract_and_clean(charges_patterns.get("gov_levy"), msg)
         charges_data["gov_levy"] = try_float(charges_gov_levy_str) if charges_gov_levy_str else None
         
-        # Only add charges if any sub-field has a value
         if any(v is not None for v in charges_data.values()):
             extracted_data["charges"] = charges_data
         else:
-            extracted_data["charges"] = {} # Or omit entirely if you prefer
+            extracted_data["charges"] = {}
 
         # Extract recipient dict
         recipient_data = {}
@@ -184,99 +176,132 @@ def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
         recipient_data["phone_number"] = extract_and_clean(recipient_patterns.get("phone_number"), msg)
         recipient_data["agent_id"] = extract_and_clean(recipient_patterns.get("agent_id"), msg)
 
-        # Only add recipient if any sub-field has a value
         if any(v is not None for v in recipient_data.values()):
             extracted_data["recipient"] = recipient_data
         else:
-            extracted_data["recipient"] = {} # Or omit entirely if you prefer
+            extracted_data["recipient"] = {}
 
         extracted_data["service"] = service
         extracted_data["raw"] = msg
 
         # Final filtering: remove keys with None or empty string values
-        # This will iterate over all extracted_data and its nested dictionaries
         def clean_dict(d):
             return {k: v for k, v in d.items() if v is not None and v != "" and (not isinstance(v, dict) or clean_dict(v))}
 
         cleaned_result = clean_dict(extracted_data)
         
-        return cleaned_result if cleaned_result else None # Return None if nothing was extracted
+        return cleaned_result if cleaned_result else None
 
     except re.error as e:
         logging.error(f"Regex error in parse_with_patterns for service {service}: {e}")
         return None
 
-# --------- USER DATA ---------
-def save_transaction(user_id: str, transaction: Dict[str, Any]):
-    """Saves a parsed transaction for a specific user."""
-    user_dir = os.path.join(USER_DATA_DIR, user_id)
-    os.makedirs(user_dir, exist_ok=True)
-    path = os.path.join(user_dir, "transactions.json")
-    transactions = load_transactions(user_id)
-    transactions.append(transaction)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(transactions, f, indent=2)
-
-def load_transactions(user_id: str) -> List[Dict[str, Any]]:
-    """Loads all transactions for a specific user."""
-    path = os.path.join(USER_DATA_DIR, user_id, "transactions.json")
-    if not os.path.exists(path):
-        return []
+# --- NEW: PHP API Communication Functions ---
+def _make_api_request(action: str, method: str = "GET", data: Optional[Dict[str, Any]] = None, params: Optional[Dict[str, Any]] = None) -> Any:
+    """Helper function to make requests to the PHP API."""
+    url = f"{PHP_API_URL}?action={action}"
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        if method == "GET":
+            response = requests.get(url, params=params)
+        elif method == "POST":
+            response = requests.post(url, json=data)
+        elif method == "DELETE":
+            response = requests.delete(url, params=params)
+        else:
+            raise ValueError(f"Unsupported HTTP method: {method}")
+
+        response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error communicating with PHP API ({action}): {e}")
+        raise HTTPException(status_code=500, detail=f"Backend communication error: {e}")
     except json.JSONDecodeError:
-        logging.error(f"JSON decode error in user transactions for {user_id}. Returning empty list.")
-        return []
+        logging.error(f"Failed to decode JSON from PHP API ({action}): {response.text}")
+        raise HTTPException(status_code=500, detail="Invalid JSON response from backend.")
 
-def save_summary(user_id: str, summary: Dict[str, Any]):
-    """Saves the spending summary for a specific user."""
-    user_dir = os.path.join(USER_DATA_DIR, user_id)
-    os.makedirs(user_dir, exist_ok=True)
-    path = os.path.join(user_dir, "summary.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+def _save_transaction_to_db(user_id: str, transaction: Dict[str, Any]):
+    """Saves a parsed transaction to the database via PHP API."""
+    # The PHP API expects certain fields. Let's make sure they are present.
+    # Adjust as per your PHP script's expected fields.
+    payload = {
+        "user_id": user_id,
+        "transaction_id": transaction.get("transaction_id"),
+        "date_time": transaction.get("date_time"),
+        "transaction_type": transaction.get("transaction_type"),
+        "amount": transaction.get("amount"),
+        "service": transaction.get("service"),
+        "raw": transaction.get("raw")
+    }
+    # Clean payload to remove None values that might cause issues with PHP API
+    # (especially for non-nullable database columns)
+    cleaned_payload = {k: v for k, v in payload.items() if v is not None}
+    
+    # Ensure amount is treated as a float or string, based on PHP's expectation
+    if 'amount' in cleaned_payload and isinstance(cleaned_payload['amount'], float):
+        cleaned_payload['amount'] = str(cleaned_payload['amount']) # Send as string to avoid precision issues if PHP doesn't handle floats well directly
 
-def update_user_summary(user_id: str) -> Dict[str, Any]:
-    """Calculates and updates daily, weekly, and monthly spending summaries for a user."""
-    transactions = load_transactions(user_id)
+    logging.info(f"Saving transaction to DB: {cleaned_payload}")
+    return _make_api_request("save_transaction", method="POST", data=cleaned_payload)
+
+def _load_transactions_from_db(user_id: str) -> List[Dict[str, Any]]:
+    """Loads all transactions for a specific user from the database via PHP API."""
+    response = _make_api_request("get_transactions", params={"user_id": user_id})
+    if isinstance(response, list):
+        # Convert numeric strings back to floats for calculations in Python
+        for t in response:
+            if 'amount' in t and t['amount'] is not None:
+                try:
+                    t['amount'] = float(t['amount'])
+                except (ValueError, TypeError):
+                    t['amount'] = None
+        return response
+    logging.error(f"Unexpected response format for get_transactions: {response}")
+    return []
+
+def _get_summary_from_db(user_id: str) -> Dict[str, Any]:
+    """
+    Calculates and returns daily, weekly, and monthly spending summaries for a user
+    by fetching all transactions from the database.
+    """
+    transactions = _load_transactions_from_db(user_id)
     daily = defaultdict(float)
     weekly = defaultdict(float)
     monthly = defaultdict(float)
 
     for t in transactions:
+        # Check for 'transaction_type' to exclude irrelevant transactions (e.g., received money)
+        # You might need to adjust this logic based on your definition of "spending"
+        # For simplicity, let's assume all 'amount' entries are spending for now, or refine if needed.
         if not t.get("amount") or not t.get("date_time"):
             continue
         try:
             amount = float(t["amount"])
-            # Ensure the date_time format matches what's stored
-            dt = datetime.strptime(t["date_time"], "%Y-%m-%d %H:%M:%S")
+            # Assuming 'date_time' from DB is in '%Y-%m-%d %H:%M:%S' format or similar
+            dt = datetime.strptime(str(t["date_time"]), "%Y-%m-%d %H:%M:%S")
             daily[dt.strftime("%Y-%m-%d")] += amount
             weekly[f"week_{dt.strftime('%U_%Y')}"] += amount
             monthly[dt.strftime("%B_%Y")] += amount
-        except (ValueError, TypeError):
-            logging.warning(f"Could not process transaction for summary due to invalid amount or date_time: {t}")
+        except (ValueError, TypeError, KeyError) as e:
+            logging.warning(f"Could not process transaction for summary due to invalid amount or date_time: {t}, Error: {e}")
             continue
 
     summary = {"daily": dict(daily), "weekly": dict(weekly), "monthly": dict(monthly)}
-    save_summary(user_id, summary)
     return summary
 
 def get_manual_advice(user_id: str) -> str:
-    """Provides simple, non-AI financial advice based on user's spending summary."""
-    summary_path = os.path.join(USER_DATA_DIR, user_id, "summary.json")
-    if not os.path.exists(summary_path):
-        return "Hakuna data ya kutosha kutoa ushauri."
-
-    with open(summary_path, "r", encoding="utf-8") as f:
-        summary = json.load(f)
+    """Provides simple, non-AI financial advice based on user's spending summary from DB."""
+    summary = _get_summary_from_db(user_id) # Get summary by fetching from DB
 
     if summary.get("weekly"):
         try:
             # Sort weekly keys to get the most recent week's spending
-            latest_week_key = sorted(summary["weekly"].keys(), key=lambda x: (int(x.split('_')[2]), int(x.split('_')[1])), reverse=True)[0]
-            latest_week_spending = summary["weekly"][latest_week_key]
-        except (IndexError, ValueError):
+            latest_week_key = sorted(summary["weekly"].keys(), key=lambda x: (int(x.split('_')[2]), int(x.split('_')[1])), reverse=True)
+            if not latest_week_key:
+                return "Bado hatuna data ya kutosha ya matumizi wiki hii."
+            
+            latest_week_spending = summary["weekly"][latest_week_key[0]]
+        except (IndexError, ValueError) as e:
+            logging.error(f"Error getting latest week spending: {e}")
             return "Bado hatuna data ya kutosha ya matumizi wiki hii."
 
         if latest_week_spending > 100000:
@@ -295,14 +320,18 @@ class SMSPayload(BaseModel):
 def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
     """
     Analyzes a single SMS message, detects service, parses it using stored patterns,
-    and saves the transaction if successful.
+    and saves the transaction to the database if successful.
     """
     service = detect_service(msg)
     parsed = parse_with_patterns(msg, service)
 
     if parsed:
-        save_transaction(user_id, parsed)
-        return {"success": True, "source": "local", "data": parsed}
+        try:
+            _save_transaction_to_db(user_id, parsed)
+            return {"success": True, "source": "database", "data": parsed}
+        except HTTPException as e:
+            logging.error(f"Failed to save transaction to DB for user {user_id}: {e.detail}")
+            return {"success": False, "error": f"Failed to save transaction: {e.detail}"}
     else:
         logging.info(f"Failed to parse message: '{msg}' with service '{service}'.")
         return {"success": False, "error": "Failed to parse message using available patterns."}
@@ -311,20 +340,23 @@ def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
 @app.get("/")
 def root():
     """Root endpoint for the MMTA Backend."""
-    return {"message": "MMTA Backend V9 - Manual Pattern Learning + User Summary"}
+    return {"message": "MMTA Backend V9 - Database Integration + User Summary"}
 
 @app.post("/analyze")
 def analyze_sms(payload: SMSPayload):
     """
-    Analyzes a list of SMS messages for a given user, updates their summary,
+    Analyzes a list of SMS messages for a given user, updates their summary (calculated on-the-fly),
     and provides financial advice.
     """
     results = [analyze_message(msg, payload.user_id) for msg in payload.messages]
-    summary = update_user_summary(payload.user_id)
+    
+    # After processing messages, calculate and return the updated summary
+    summary = _get_summary_from_db(payload.user_id) 
+    
     return {
         "analysis": results,
         "summary": summary,
-        "advice": get_manual_advice(payload.user_id), # Using manual advice
+        "advice": get_manual_advice(payload.user_id),
         "total_messages_processed": len(payload.messages)
     }
 
@@ -349,32 +381,51 @@ def get_service_patterns(service_name: str):
 
 @app.get("/user-summary/{user_id}")
 def get_user_summary(user_id: str):
-    """Returns the spending summary for a specific user."""
-    summary_path = os.path.join(USER_DATA_DIR, user_id, "summary.json")
-    if not os.path.exists(summary_path):
-        raise HTTPException(status_code=404, detail="User summary not found.")
-    with open(summary_path, "r", encoding="utf-8") as f:
-        return json.load(f) 
+    """Returns the spending summary for a specific user from the database."""
+    summary = _get_summary_from_db(user_id)
+    if not summary.get("daily") and not summary.get("weekly") and not summary.get("monthly"):
+        raise HTTPException(status_code=404, detail="User summary not found or empty.")
+    return {"summary": summary}
 
 @app.get("/user-transactions/{user_id}")
 def get_user_transactions(user_id: str): 
-    """Returns all stored transactions for a specific user."""
-    transactions = load_transactions(user_id)
+    """Returns all stored transactions for a specific user from the database."""
+    transactions = _load_transactions_from_db(user_id)
     if not transactions:
         raise HTTPException(status_code=404, detail="No transactions found for this user.")
     return {"transactions": transactions}
 
 @app.post("/user-transactions/{user_id}")
 def save_user_transaction(user_id: str, transaction: Dict[str, Any]):
-    """Manually saves a transaction for a specific user."""
+    """Manually saves a transaction for a specific user to the database."""
     if not transaction:
         raise HTTPException(status_code=400, detail="Transaction data is required.")
-    save_transaction(user_id, transaction)
-    return {"status": "success", "message": "Transaction saved successfully."}
+    try:
+        _save_transaction_to_db(user_id, transaction)
+        return {"status": "success", "message": "Transaction saved successfully to database."}
+    except HTTPException as e:
+        raise e # Re-raise the HTTPException from _save_transaction_to_db
+
+@app.delete("/user-transactions/{user_id}")
+def delete_user_transactions(user_id: str):
+    """Deletes all transactions for a specific user from the database via PHP API."""
+    try:
+        response = _make_api_request("delete_user", method="DELETE", params={"user_id": user_id})
+        return response
+    except HTTPException as e:
+        raise e
 
 @app.get("/user-advice/{user_id}")
-def get_user_advice(user_id: str):
+def get_user_advice_api(user_id: str):
     """Returns financial advice for a specific user."""
-    advice = get_manual_advice(user_id) # Calling the manual advice function
+    advice = get_manual_advice(user_id)
     return {"advice": advice}
 
+@app.get("/check-user/{user_id}")
+def check_user_exists(user_id: str):
+    """Checks if a user exists in the database via PHP API."""
+    try:
+        response = _make_api_request("check_user", params={"user_id": user_id})
+        return response
+    except HTTPException as e:
+        raise e
