@@ -9,17 +9,19 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# --------- LOGGING ---------
 logging.basicConfig(level=logging.INFO)
 
+# --------- FASTAPI APP INIT ---------
 app = FastAPI(title="MMTA Backend V9 - Manual Pattern Learning")
 
+# --------- CORS SETUP ---------
 origins = [
     "http://localhost",
     "http://127.0.0.1",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
 ]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -28,12 +30,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --------- DIRECTORY SETUP ---------
 DATA_DIR = "data"
 USER_DATA_DIR = os.path.join(DATA_DIR, "users")
 PATTERNS_FILE = os.path.join(DATA_DIR, "patterns.json")
-
 os.makedirs(USER_DATA_DIR, exist_ok=True)
 
+# --------- JSON UTILS ---------
 def load_json(file_path: str) -> Dict[str, Any]:
     if os.path.exists(file_path):
         try:
@@ -50,8 +53,10 @@ def save_json(data: Any, file_path: str):
     except Exception as e:
         logging.error(f"Failed to save JSON to {file_path}: {e}")
 
-patterns = load_json(PATTERNS_FILE)  # Predefined regex patterns for services (you need to create this file)
+# --------- LOAD PATTERNS ---------
+patterns = load_json(PATTERNS_FILE)
 
+# --------- HELPERS ---------
 def try_float(value: Optional[str]) -> Optional[float]:
     try:
         return float(re.sub(r'[^\d.]', '', value)) if value else None
@@ -98,12 +103,9 @@ def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
         net_amount_str = extract(service_patterns.get("net_amount"), msg)
         extracted["net_amount"] = try_float(net_amount_str) if net_amount_str else None
 
-        # ... add more fields as needed
-
         extracted["service"] = service
         extracted["raw"] = msg
 
-        # Clean out None or empty fields
         cleaned = {k: v for k, v in extracted.items() if v not in [None, "", {}]}
         return cleaned if cleaned else None
     except re.error as e:
@@ -179,10 +181,12 @@ def get_manual_advice(user_id: str) -> str:
 
     return "Bado hatuna data ya kutosha ya matumizi wiki hii."
 
+# --------- INPUT MODEL ---------
 class SMSPayload(BaseModel):
     user_id: str
     messages: List[str]
 
+# --------- CORE LOGIC ---------
 def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
     service = detect_service(msg)
     parsed = parse_with_patterns(msg, service)
@@ -193,8 +197,13 @@ def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
         logging.info(f"Failed to parse message: '{msg}' with service '{service}'.")
         return {"success": False, "error": "Failed to parse message."}
 
+# --------- ENDPOINTS ---------
 @app.post("/analyze")
 def analyze_sms(payload: SMSPayload):
+    # ✅ Validate user_id
+    if not payload.user_id.strip():
+        raise HTTPException(status_code=400, detail="Missing or invalid 'user_id'.")
+
     results = [analyze_message(msg, payload.user_id) for msg in payload.messages]
     summary = update_user_summary(payload.user_id)
     advice = get_manual_advice(payload.user_id)
@@ -208,5 +217,3 @@ def analyze_sms(payload: SMSPayload):
 @app.get("/")
 def root():
     return {"message": "MMTA Backend V9 - Manual Pattern Learning"}
-
-# Add other routes as needed
