@@ -17,7 +17,7 @@ app = FastAPI(title="MMTA Backend V9 - Manual Pattern Learning")
 
 # --------- CORS SETUP ---------
 origins = [
-    "https://calcue.wuaze.com/",
+    "https://calcue.wuaze.com",
     "http://localhost",
     "http://127.0.0.1",
     "http://localhost:8000",
@@ -217,4 +217,4 @@ def analyze_sms(payload: SMSPayload):
 
 @app.get("/")
 def root():
-    return {"message": "MMTA Backend V9 - Manual Pattern Learning powerd By CALBRS"}
+    return {"message": "MMTA Backend V9 - Manual Pattern Learning powerd By CALBRS 36"}
