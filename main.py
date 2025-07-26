@@ -5,39 +5,43 @@ import logging
 from datetime import datetime
 from collections import defaultdict
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status # Import status for HTTP status codes
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import httpx # Import httpx for making HTTP requests
 
 # --------- LOGGING ---------
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --------- FASTAPI APP INIT ---------
-app = FastAPI(title="MMTA Backend V9 - Manual Pattern Learning")
+app = FastAPI(title="MMTA Backend V9 - Database Integration")
 
 # --------- CORS SETUP ---------
 origins = [
-    "https://calcue.wuaze.com",
+    "https://calcue.wuaze.com", # Your frontend domain
     "http://localhost",
     "http://127.0.0.1",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
+    # Add any other origins your frontend might be running from
 ]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=[str(origin) for origin in origins], # Ensure all origins are strings
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --------- DIRECTORY SETUP ---------
+# --------- DIRECTORY SETUP (Still needed for patterns.json, but not user data) ---------
 DATA_DIR = "data"
-USER_DATA_DIR = os.path.join(DATA_DIR, "users")
 PATTERNS_FILE = os.path.join(DATA_DIR, "patterns.json")
-os.makedirs(USER_DATA_DIR, exist_ok=True)
+# os.makedirs(USER_DATA_DIR, exist_ok=True) # No longer needed for user data folders
 
-# --------- JSON UTILS ---------
+# --------- PHP API URL ---------
+PHP_API_BASE_URL = "https://calcue.wuaze.com/mmta_api.php"
+
+# --------- JSON UTILS (Only for patterns.json) ---------
 def load_json(file_path: str) -> Dict[str, Any]:
     if os.path.exists(file_path):
         try:
@@ -47,6 +51,7 @@ def load_json(file_path: str) -> Dict[str, Any]:
             logging.error(f"Failed to load JSON from {file_path}: {e}")
     return {}
 
+# save_json is no longer strictly needed for user data, but kept if you want to save patterns
 def save_json(data: Any, file_path: str):
     try:
         with open(file_path, "w", encoding="utf-8") as f:
@@ -57,7 +62,7 @@ def save_json(data: Any, file_path: str):
 # --------- LOAD PATTERNS ---------
 patterns = load_json(PATTERNS_FILE)
 
-# --------- HELPERS ---------
+# --------- HELPERS (No change to parsing logic) ---------
 def try_float(value: Optional[str]) -> Optional[float]:
     try:
         return float(re.sub(r'[^\d.]', '', value)) if value else None
@@ -113,30 +118,81 @@ def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
         logging.error(f"Regex error: {e}")
         return None
 
-def get_user_dir(user_id: str) -> str:
-    path = os.path.join(USER_DATA_DIR, user_id)
-    os.makedirs(path, exist_ok=True)
-    return path
-
-def load_transactions(user_id: str) -> List[Dict[str, Any]]:
-    path = os.path.join(get_user_dir(user_id), "transactions.json")
-    if not os.path.exists(path):
-        return []
+# --------- DATABASE INTERACTION FUNCTIONS (via PHP API) ---------
+async def save_transaction_to_db(user_id: str, transaction: Dict[str, Any]) -> bool:
+    """Saves a single transaction to the MySQL DB via PHP API."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        # The PHP API expects user_id in the POST body for 'save_transaction' action
+        payload = {"user_id": user_id, **transaction}
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{PHP_API_BASE_URL}?action=save_transaction",
+                json=payload
+            )
+            response.raise_for_status() # Raises an exception for 4xx/5xx responses
+            result = response.json()
+            if result.get("status") == "success":
+                logging.info(f"Transaction for user {user_id} saved successfully to DB.")
+                return True
+            else:
+                logging.error(f"Failed to save transaction to DB for user {user_id}: {result.get('message', 'Unknown error')}")
+                return False
+    except httpx.HTTPStatusError as exc:
+        logging.error(f"HTTP error saving transaction for user {user_id}: {exc.response.status_code} - {exc.response.text}")
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Failed to save transaction to database: {exc.response.json().get('error', 'Server error')}"
+        )
+    except httpx.RequestError as exc:
+        logging.error(f"Network error saving transaction for user {user_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not connect to database service."
+        )
     except Exception as e:
-        logging.error(f"Error loading transactions for {user_id}: {e}")
-        return []
+        logging.error(f"Unexpected error saving transaction for user {user_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while saving transaction."
+        )
 
-def save_transaction(user_id: str, transaction: Dict[str, Any]):
-    transactions = load_transactions(user_id)
-    transactions.append(transaction)
-    path = os.path.join(get_user_dir(user_id), "transactions.json")
-    save_json(transactions, path)
+async def load_transactions_from_db(user_id: str) -> List[Dict[str, Any]]:
+    """Loads all transactions for a user from MySQL DB via PHP API."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{PHP_API_BASE_URL}?action=get_transactions&user_id={user_id}"
+            )
+            response.raise_for_status()
+            transactions = response.json()
+            if isinstance(transactions, list):
+                return transactions
+            else:
+                logging.error(f"Unexpected response format for user {user_id} transactions: {transactions}")
+                return []
+    except httpx.HTTPStatusError as exc:
+        logging.error(f"HTTP error loading transactions for user {user_id}: {exc.response.status_code} - {exc.response.text}")
+        # If user not found (404), return empty list rather than raising error for this specific case
+        if exc.response.status_code == 404 and "User with ID" in exc.response.text:
+            return []
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Failed to load transactions from database: {exc.response.json().get('error', 'Server error')}"
+        )
+    except httpx.RequestError as exc:
+        logging.error(f"Network error loading transactions for user {user_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not connect to database service."
+        )
+    except Exception as e:
+        logging.error(f"Unexpected error loading transactions for user {user_id}: {e}")
+        return [] # Return empty list on unexpected errors for data loading
 
-def update_user_summary(user_id: str) -> Dict[str, Any]:
-    transactions = load_transactions(user_id)
+async def get_user_summary_from_db(user_id: str) -> Dict[str, Any]:
+    """Calculates and returns user summary based on transactions from DB."""
+    transactions = await load_transactions_from_db(user_id)
+    
     daily = defaultdict(float)
     weekly = defaultdict(float)
     monthly = defaultdict(float)
@@ -146,11 +202,14 @@ def update_user_summary(user_id: str) -> Dict[str, Any]:
             continue
         try:
             amount = float(t["amount"])
-            dt = datetime.strptime(t["date_time"], "%Y-%m-%d %H:%M:%S")
+            # Adjust date_time format if needed based on what your PHP API returns
+            # Assuming PHP API returns format like 'YYYY-MM-DD HH:MM:SS'
+            dt = datetime.strptime(str(t["date_time"]), "%Y-%m-%d %H:%M:%S")
             daily[dt.strftime("%Y-%m-%d")] += amount
             weekly[f"week_{dt.strftime('%U_%Y')}"] += amount
             monthly[dt.strftime("%B_%Y")] += amount
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Skipping transaction due to parsing error: {t} - {e}")
             continue
 
     summary = {
@@ -158,58 +217,92 @@ def update_user_summary(user_id: str) -> Dict[str, Any]:
         "weekly": dict(weekly),
         "monthly": dict(monthly),
     }
-    summary_path = os.path.join(get_user_dir(user_id), "summary.json")
-    save_json(summary, summary_path)
     return summary
 
-def get_manual_advice(user_id: str) -> str:
-    summary_path = os.path.join(get_user_dir(user_id), "summary.json")
-    if not os.path.exists(summary_path):
+async def get_advice_from_summary(user_id: str) -> str:
+    """Provides advice based on the calculated summary."""
+    summary = await get_user_summary_from_db(user_id)
+
+    if not summary.get("weekly"):
         return "Hakuna data ya kutosha kutoa ushauri."
 
     try:
-        with open(summary_path, "r", encoding="utf-8") as f:
-            summary = json.load(f)
-        if summary.get("weekly"):
-            latest_week_key = sorted(summary["weekly"].keys(), reverse=True)[0]
-            latest_spending = summary["weekly"][latest_week_key]
-            if latest_spending > 100000:
-                return f"Wiki hii umetumia {latest_spending:,.2f} TZS. Jaribu kupunguza matumizi."
-            elif latest_spending > 0:
-                return "Matumizi yako wiki hii yako sawa. Endelea kudhibiti gharama zako."
-    except Exception:
+        latest_week_key = sorted(summary["weekly"].keys(), reverse=True)[0]
+        latest_spending = summary["weekly"][latest_week_key]
+        if latest_spending > 100000:
+            return f"Wiki hii umetumia {latest_spending:,.2f} TZS. Jaribu kupunguza matumizi."
+        elif latest_spending > 0:
+            return "Matumizi yako wiki hii yako sawa. Endelea kudhibiti gharama zako."
+    except Exception as e:
+        logging.error(f"Tatizo lilitokea katika kusoma data ya ushauri for user {user_id}: {e}")
         return "Tatizo lilitokea katika kusoma data ya ushauri."
 
     return "Bado hatuna data ya kutosha ya matumizi wiki hii."
+
 
 # --------- INPUT MODEL ---------
 class SMSPayload(BaseModel):
     user_id: str
     messages: List[str]
 
-# --------- CORE LOGIC ---------
-def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
+# --------- CORE LOGIC (Modified to use DB functions) ---------
+async def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
     service = detect_service(msg)
     parsed = parse_with_patterns(msg, service)
     if parsed:
-        save_transaction(user_id, parsed)
-        return {"success": True, "data": parsed}
+        # Attempt to save to database via PHP API
+        success_db = await save_transaction_to_db(user_id, parsed)
+        if success_db:
+            return {"success": True, "data": parsed, "db_saved": True}
+        else:
+            return {"success": False, "error": "Failed to save to database.", "data": parsed, "db_saved": False}
     else:
         logging.info(f"Failed to parse message: '{msg}' with service '{service}'.")
         return {"success": False, "error": "Failed to parse message."}
 
-# --------- ENDPOINTS ---------
+# --------- ENDPOINTS (Modified to use DB functions) ---------
 @app.post("/analyze")
-def analyze_sms(payload: SMSPayload):
+async def analyze_sms(payload: SMSPayload):
     # ✅ Validate user_id
     if not payload.user_id.strip():
         raise HTTPException(status_code=400, detail="Missing or invalid 'user_id'.")
 
-    results = [analyze_message(msg, payload.user_id) for msg in payload.messages]
-    summary = update_user_summary(payload.user_id)
-    advice = get_manual_advice(payload.user_id)
+    # Check if user exists in the database via PHP API
+    try:
+        async with httpx.AsyncClient() as client:
+            user_check_response = await client.get(f"{PHP_API_BASE_URL}?action=check_user&user_id={payload.user_id}")
+            user_check_response.raise_for_status()
+            user_exists_data = user_check_response.json()
+            if not user_exists_data.get("exists"):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User '{payload.user_id}' does not exist in the database."
+                )
+    except httpx.HTTPStatusError as exc:
+        logging.error(f"HTTP error checking user existence: {exc.response.status_code} - {exc.response.text}")
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Failed to check user existence: {exc.response.json().get('error', 'Server error')}"
+        )
+    except httpx.RequestError as exc:
+        logging.error(f"Network error checking user existence: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not connect to user verification service."
+        )
+
+
+    analysis_results = []
+    for msg in payload.messages:
+        result = await analyze_message(msg, payload.user_id)
+        analysis_results.append(result)
+    
+    # Get summary and advice from DB
+    summary = await get_user_summary_from_db(payload.user_id)
+    advice = await get_advice_from_summary(payload.user_id)
+
     return {
-        "analysis": results,
+        "analysis": analysis_results,
         "summary": summary,
         "advice": advice,
         "total_messages_processed": len(payload.messages)
@@ -218,3 +311,44 @@ def analyze_sms(payload: SMSPayload):
 @app.get("/")
 def root():
     return {"message": "MMTA Backend V9 - Manual Pattern Learning powerd By CALBRS 36"}
+
+# New endpoint to create a user in MySQL DB (optional, but useful for initial setup)
+@app.post("/create_user_db")
+async def create_user_in_db(user_payload: Dict[str, str]):
+    user_id = user_payload.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User ID is required in the request body.")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{PHP_API_BASE_URL}?action=create_user",
+                json={"user_id": user_id}
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("status") == "success":
+                return {"message": result.get("message", f"User {user_id} created successfully.")}
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=result.get("message", "Failed to create user in database.")
+                )
+    except httpx.HTTPStatusError as exc:
+        logging.error(f"HTTP error creating user {user_id}: {exc.response.status_code} - {exc.response.text}")
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Failed to create user in database: {exc.response.json().get('message', 'Server error')}"
+        )
+    except httpx.RequestError as exc:
+        logging.error(f"Network error creating user {user_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not connect to user creation service."
+        )
+    except Exception as e:
+        logging.error(f"Unexpected error creating user {user_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while creating user."
+        )
