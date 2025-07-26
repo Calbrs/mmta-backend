@@ -217,4 +217,4 @@ def analyze_sms(payload: SMSPayload):
 
 @app.get("/")
 def root():
-    return {"message": "MMTA Backend V9 - Manual Pattern Learning"}
+    return {"message": "MMTA Backend V9 - Manual Pattern Learning powerd By CALBRS"}
