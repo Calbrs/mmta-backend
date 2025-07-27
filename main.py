@@ -1,6 +1,7 @@
-import json
 import os
 import re
+import json
+import time
 import logging
 from datetime import datetime
 from collections import defaultdict
@@ -10,17 +11,21 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
-# Import the AES cipher from the new library
 from Crypto.Cipher import AES
 
-# --------- LOGGING ---------
-# Set level to DEBUG to get more detailed output when things go wrong
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# =========================
+# LOGGING SETUP
+# =========================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --------- FASTAPI APP INIT ---------
-app = FastAPI(title="MMTA Backend V14 - Challenge Bypass 001")
+# =========================
+# FASTAPI APP
+# =========================
+app = FastAPI(title="MMTA Backend V15 - Smart Challenge Solver")
 
-# --------- CORS SETUP (keep your existing setup) ---------
+# =========================
+# CORS SETUP
+# =========================
 origins = [
     "https://calcue.wuaze.com",
     "http://localhost",
@@ -36,14 +41,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------- DIRECTORY SETUP & PHP API (keep your existing setup) ---------
+# =========================
+# CONSTANTS & PATHS
+# =========================
 DATA_DIR = "data"
 PATTERNS_FILE = os.path.join(DATA_DIR, "patterns.json")
 os.makedirs(DATA_DIR, exist_ok=True)
+
 API_KEY = "mmta-backedn-w2J8Smes2V1V44cWRAL4FydxjY43OSW8-calbrs"
 PHP_API_BASE_URL = f"https://calcue.wuaze.com/mmta_api.php?api_key={API_KEY}"
 
-# ... (keep all your existing helper functions like load_json, save_json, etc.) ...
+CHALLENGE_CACHE_FILE = os.path.join(DATA_DIR, "challenge_cookie.json")
+
+# =========================
+# JSON HELPERS
+# =========================
 def load_json(file_path: str) -> Dict[str, Any]:
     if os.path.exists(file_path):
         try:
@@ -59,14 +71,21 @@ def save_json(data: Any, file_path: str):
             json.dump(data, f, indent=2)
     except Exception as e:
         logging.error(f"Failed to save JSON to {file_path}: {e}")
-# --------- LOAD PATTERNS ---------
+
+# =========================
+# LOAD PATTERNS
+# =========================
 patterns = load_json(PATTERNS_FILE)
-# --------- HELPERS ---------
+
+# =========================
+# UTILITY FUNCTIONS
+# =========================
 def try_float(value: Optional[str]) -> Optional[float]:
     try:
         return float(re.sub(r'[^\d.]', '', value)) if value else None
     except ValueError:
         return None
+
 def detect_service(msg: str) -> str:
     lower = msg.lower()
     if re.search(r"^[A-Z0-9]+\s+\(?(?:imethibitishwa|confirmed)\)?\s*", msg, re.I):
@@ -78,6 +97,7 @@ def detect_service(msg: str) -> str:
     if re.search(r"TID[:\s]*([A-Z0-9.]+)", msg, re.I) or "tigo" in lower:
         return "TIGO"
     return "Unknown"
+
 def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
     service_patterns = patterns.get(service)
     if not service_patterns:
@@ -109,116 +129,75 @@ def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
         logging.error(f"Regex error: {e}")
         return None
 
-# --------- 🤖 NEW: ANTI-BOT CHALLENGE SOLVER ---------
-# --------- 🤖 REVISED: ANTI-BOT CHALLENGE SOLVER (More Robust) ---------
-def solve_js_challenge(html_content: str) -> Optional[Dict[str, str]]:
-    """
-    Parses the JavaScript challenge HTML to extract parameters,
-    decrypts them to find the cookie value, and returns the cookie and redirect URL.
-    This version is more robust with better error handling and logging.
-    """
-    try:
-        # Define patterns with optional whitespace handling (\s*) to be more flexible
-        patterns = {
-            "key": r'var\s+a\s*=\s*toNumbers\("([a-f0-9]+)"\)',
-            "iv": r'var\s+b\s*=\s*toNumbers\("([a-f0-9]+)"\)',
-            "ciphertext": r'var\s+c\s*=\s*toNumbers\("([a-f0-9]+)"\)',
-            "redirect": r'location\.href\s*=\s*"([^"]+)"'
-        }
+# =========================
+# SMART CHALLENGE SOLVER
+# =========================
+def extract_challenge_params(html: str) -> dict:
+    params = {}
+    patterns = {
+        "key": r'toNumbers\(["\']?([a-fA-F0-9]+)["\']?\)',
+        "iv": r'toNumbers\(["\']?([a-fA-F0-9]+)["\']?\)',
+        "ciphertext": r'toNumbers\(["\']?([a-fA-F0-9]+)["\']?\)',
+        "redirect": r'location\.href\s*=\s*[\'"]([^\'"]+)[\'"]'
+    }
+    matches = re.findall(patterns["key"], html)
+    if len(matches) >= 1:
+        params["key"] = matches[0]
+    matches = re.findall(patterns["iv"], html)
+    if len(matches) >= 2:
+        params["iv"] = matches[1]
+    matches = re.findall(patterns["ciphertext"], html)
+    if len(matches) >= 3:
+        params["ciphertext"] = matches[2]
+    redirect_match = re.search(patterns["redirect"], html)
+    if redirect_match:
+        params["redirect"] = redirect_match.group(1)
+    return params
 
-        # Search for each pattern and handle failure gracefully
-        key_match = re.search(patterns["key"], html_content)
-        if not key_match:
-            logging.error("Challenge solve failed: Could not find key pattern 'a'.")
-            # The line below is crucial: it will print the HTML that caused the failure to your console.
-            logging.debug(f"Problematic HTML content:\n{html_content}")
-            return None
-        key_hex = key_match.group(1)
+def decrypt_cookie(key_hex: str, iv_hex: str, cipher_hex: str) -> str:
+    key = bytes.fromhex(key_hex)
+    iv = bytes.fromhex(iv_hex)
+    cipher = bytes.fromhex(cipher_hex)
+    cipher_obj = AES.new(key, AES.MODE_CBC, iv)
+    decrypted = cipher_obj.decrypt(cipher)
+    return decrypted.hex()
 
-        iv_match = re.search(patterns["iv"], html_content)
-        if not iv_match:
-            logging.error("Challenge solve failed: Could not find IV pattern 'b'.")
-            logging.debug(f"Problematic HTML content:\n{html_content}")
-            return None
-        iv_hex = iv_match.group(1)
+async def solve_smart_challenge(client: httpx.AsyncClient, challenge_html: str) -> dict:
+    logging.info("Attempting to solve smart challenge...")
+    params = extract_challenge_params(challenge_html)
+    if not all(k in params for k in ("key", "iv", "ciphertext", "redirect")):
+        with open("debug_challenge.html", "w", encoding="utf-8") as f:
+            f.write(challenge_html)
+        raise ValueError("Failed to extract challenge params. HTML saved to debug_challenge.html")
+    cookie_value = decrypt_cookie(params["key"], params["iv"], params["ciphertext"])
+    return {
+        "cookie_name": "__test",
+        "cookie_value": cookie_value,
+        "redirect_url": params["redirect"].replace("&amp;", "&")
+    }
 
-        ciphertext_match = re.search(patterns["ciphertext"], html_content)
-        if not ciphertext_match:
-            logging.error("Challenge solve failed: Could not find ciphertext pattern 'c'.")
-            logging.debug(f"Problematic HTML content:\n{html_content}")
-            return None
-        ciphertext_hex = ciphertext_match.group(1)
-
-        redirect_match = re.search(patterns["redirect"], html_content)
-        if not redirect_match:
-            logging.error("Challenge solve failed: Could not find redirect URL.")
-            logging.debug(f"Problematic HTML content:\n{html_content}")
-            return None
-        redirect_url = redirect_match.group(1)
-
-        # --- Decryption Logic (same as before) ---
-        key = bytes.fromhex(key_hex)
-        iv = bytes.fromhex(iv_hex)
-        ciphertext = bytes.fromhex(ciphertext_hex)
-
-        cipher = AES.new(key, AES.MODE_CBC, iv)
-        decrypted_bytes = cipher.decrypt(ciphertext)
-        cookie_value = decrypted_bytes.hex()
-        
-        logging.info("Successfully solved JS challenge.")
-        return {
-            "cookie_name": "__test",
-            "cookie_value": cookie_value,
-            "redirect_url": redirect_url.replace("&amp;", "&")
-        }
-    except Exception as e:
-        # This will catch other errors, e.g., if hex decoding fails
-        logging.error(f"An unexpected error occurred in solve_js_challenge: {e}")
-        logging.debug(f"Problematic HTML content:\n{html_content}")
-        return None
-
-
-# --------- 🧠 UPDATED: SMART HTTP CLIENT LOGIC ---------
-async def make_smart_request(
-    method: str,
-    url: str,
-    **kwargs
-) -> httpx.Response:
-    """
-    Makes an HTTP request that automatically handles the JS challenge.
-    """
+# =========================
+# SMART REQUEST HANDLER
+# =========================
+async def make_smart_request(method: str, url: str, **kwargs) -> httpx.Response:
     async with httpx.AsyncClient(timeout=30) as client:
-        # Make the first attempt
         response = await client.request(method, url, **kwargs)
-        
-        # Check if we received the JS challenge
-        if "aes.js" in response.text and "slowAES" in response.text:
-            logging.info("JS challenge detected. Attempting to solve...")
-            
-            # Solve the challenge to get the cookie and redirect URL
-            challenge_solution = solve_js_challenge(response.text)
-            
-            if not challenge_solution:
-                raise HTTPException(status_code=500, detail="Failed to solve the anti-bot challenge.")
 
-            # Set the required cookie
+        # Ikiwa kuna challenge
+        if "aes.js" in response.text and "slowAES" in response.text:
+            logging.info("JS challenge detected. Solving...")
+            solution = await solve_smart_challenge(client, response.text)
             client.cookies.set(
-                name=challenge_solution["cookie_name"],
-                value=challenge_solution["cookie_value"],
+                name=solution["cookie_name"],
+                value=solution["cookie_value"],
                 domain="calcue.wuaze.com"
             )
-            
-            redirect_url = challenge_solution["redirect_url"]
-            logging.info(f"Challenge solved. Following redirect to: {redirect_url}")
-
-            # Make the second request with the cookie to the new URL
-            # The original payload (if any) needs to be passed again
-            response = await client.request(method, redirect_url, **kwargs)
-            
+            response = await client.request(method, solution["redirect_url"], **kwargs)
     return response
 
-
-# --------- DATABASE INTERACTION (UPDATED) ---------
+# =========================
+# DATABASE BRIDGE FUNCTIONS
+# =========================
 async def save_transaction_to_db(user_id: str, transaction: Dict[str, Any]) -> Dict[str, Any]:
     try:
         payload = {"user_id": user_id, **transaction}
@@ -244,8 +223,6 @@ async def load_transactions_from_db(user_id: str) -> List[Dict[str, Any]]:
         logging.error(f"Error loading transactions: {e}")
         return []
 
-# ... (The rest of your functions like get_user_summary_from_db and get_advice_from_summary
-# do not need changes as they depend on the functions we just updated)
 async def get_user_summary_from_db(user_id: str) -> Dict[str, Any]:
     transactions = await load_transactions_from_db(user_id)
     daily = defaultdict(float)
@@ -262,11 +239,8 @@ async def get_user_summary_from_db(user_id: str) -> Dict[str, Any]:
             monthly[dt.strftime("%B_%Y")] += amount
         except Exception:
             continue
-    return {
-        "daily": dict(daily),
-        "weekly": dict(weekly),
-        "monthly": dict(monthly),
-    }
+    return {"daily": dict(daily), "weekly": dict(weekly), "monthly": dict(monthly)}
+
 async def get_advice_from_summary(user_id: str) -> str:
     summary = await get_user_summary_from_db(user_id)
     if not summary.get("weekly"):
@@ -281,11 +255,17 @@ async def get_advice_from_summary(user_id: str) -> str:
     except Exception:
         return "Tatizo lilitokea katika kusoma data ya ushauri."
     return "Bado hatuna data ya kutosha ya matumizi wiki hii."
-# --------- INPUT MODEL ---------
+
+# =========================
+# MODELS
+# =========================
 class SMSPayload(BaseModel):
     user_id: str
     messages: List[str]
-# --------- CORE LOGIC ---------
+
+# =========================
+# CORE LOGIC
+# =========================
 async def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
     service = detect_service(msg)
     parsed = parse_with_patterns(msg, service)
@@ -294,7 +274,9 @@ async def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
         return {"success": True, "data": parsed, "php_response": db_response}
     return {"success": False, "error": "Failed to parse message."}
 
-# --------- ENDPOINTS (UPDATED) ---------
+# =========================
+# ENDPOINTS
+# =========================
 @app.post("/analyze")
 async def analyze_sms(payload: SMSPayload):
     if not payload.user_id.strip():
@@ -304,7 +286,7 @@ async def analyze_sms(payload: SMSPayload):
     for msg in payload.messages:
         result = await analyze_message(msg, payload.user_id)
         analysis_results.append(result)
-    
+
     summary = await get_user_summary_from_db(payload.user_id)
     advice = await get_advice_from_summary(payload.user_id)
 
@@ -317,10 +299,8 @@ async def analyze_sms(payload: SMSPayload):
 
 @app.get("/php-test")
 async def php_test():
-    """This endpoint now uses the smart request handler."""
     try:
         response = await make_smart_request("GET", PHP_API_BASE_URL)
-        # Check if the final response is JSON or something else
         try:
             php_response_json = response.json()
         except json.JSONDecodeError:
@@ -336,8 +316,11 @@ async def php_test():
 
 @app.get("/")
 async def root():
-    return {"message": "MMTA Backend V14 - Challenge Bypass"}
+    return {"message": "MMTA Backend V15 - Smart Challenge Solver is running"}
 
+# =========================
+# ENTRY POINT
+# =========================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
