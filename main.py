@@ -10,14 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
 
-# For Playwright
-from playwright.async_api import async_playwright
-
 # --------- LOGGING ---------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --------- FASTAPI APP INIT ---------
-app = FastAPI(title="MMTA Backend V13 - API Key Integrated")
+app = FastAPI(title="MMTA Backend V14 - API Key Integrated (httpx only)")
 
 # --------- CORS SETUP ---------
 origins = [
@@ -228,27 +225,22 @@ async def analyze_sms(payload: SMSPayload):
         "total_messages_processed": len(payload.messages)
     }
 
-
 @app.get("/php-test")
 async def php_test():
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.goto(PHP_API_BASE_URL)
-            content = await page.content()
-            await browser.close()
+        async with httpx.AsyncClient() as client:
+            response = await client.get(PHP_API_BASE_URL, timeout=30)
             return {
                 "status": "success",
-                "php_status_code": 200,
-                "php_response": content
+                "php_status_code": response.status_code,
+                "php_response": response.text
             }
     except Exception as e:
         return {"status": "error", "message": f"PHP test failed: {e}"}
 
 @app.get("/")
 async def root():
-    return {"message": "MMTA Backend V14 - API Key Integrated"}
+    return {"message": "MMTA Backend V14 - API Key Integrated (httpx only)"}
 
 if __name__ == "__main__":
     import uvicorn
