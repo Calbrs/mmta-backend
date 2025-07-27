@@ -1,7 +1,6 @@
 import os
 import re
 import json
-import time
 import logging
 from datetime import datetime
 from collections import defaultdict
@@ -13,19 +12,13 @@ from pydantic import BaseModel
 import httpx
 from Crypto.Cipher import AES
 
-# =========================
-# LOGGING SETUP
-# =========================
+# ===== LOGGING SETUP =====
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# =========================
-# FASTAPI APP
-# =========================
-app = FastAPI(title="MMTA Backend V15 - Smart Challenge Solver")
+# ===== FASTAPI APP =====
+app = FastAPI(title="MMTA Backend V15.0.0.0.1 - Fixed Hex Parsing")
 
-# =========================
-# CORS SETUP
-# =========================
+# ===== CORS =====
 origins = [
     "https://calcue.wuaze.com",
     "http://localhost",
@@ -41,9 +34,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================
-# CONSTANTS & PATHS
-# =========================
+# ===== CONSTANTS =====
 DATA_DIR = "data"
 PATTERNS_FILE = os.path.join(DATA_DIR, "patterns.json")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -51,11 +42,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 API_KEY = "mmta-backedn-w2J8Smes2V1V44cWRAL4FydxjY43OSW8-calbrs"
 PHP_API_BASE_URL = f"https://calcue.wuaze.com/mmta_api.php?api_key={API_KEY}"
 
-CHALLENGE_CACHE_FILE = os.path.join(DATA_DIR, "challenge_cookie.json")
-
-# =========================
-# JSON HELPERS
-# =========================
+# ===== JSON HELPERS =====
 def load_json(file_path: str) -> Dict[str, Any]:
     if os.path.exists(file_path):
         try:
@@ -72,14 +59,10 @@ def save_json(data: Any, file_path: str):
     except Exception as e:
         logging.error(f"Failed to save JSON to {file_path}: {e}")
 
-# =========================
-# LOAD PATTERNS
-# =========================
+# ===== LOAD PATTERNS =====
 patterns = load_json(PATTERNS_FILE)
 
-# =========================
-# UTILITY FUNCTIONS
-# =========================
+# ===== UTILITY FUNCTIONS =====
 def try_float(value: Optional[str]) -> Optional[float]:
     try:
         return float(re.sub(r'[^\d.]', '', value)) if value else None
@@ -129,35 +112,40 @@ def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
         logging.error(f"Regex error: {e}")
         return None
 
-# =========================
-# SMART CHALLENGE SOLVER
-# =========================
+# ===== SMART CHALLENGE SOLVER =====
+def sanitize_hex(hex_str: str) -> str:
+    # Ondoa whitespaces, newlines, na characters zisizo za hex
+    return re.sub(r'[^0-9a-fA-F]', '', hex_str)
+
 def extract_challenge_params(html: str) -> dict:
     params = {}
-    patterns = {
-        "key": r'toNumbers\(["\']?([a-fA-F0-9]+)["\']?\)',
-        "iv": r'toNumbers\(["\']?([a-fA-F0-9]+)["\']?\)',
-        "ciphertext": r'toNumbers\(["\']?([a-fA-F0-9]+)["\']?\)',
-        "redirect": r'location\.href\s*=\s*[\'"]([^\'"]+)[\'"]'
-    }
-    matches = re.findall(patterns["key"], html)
-    if len(matches) >= 1:
-        params["key"] = matches[0]
-    matches = re.findall(patterns["iv"], html)
-    if len(matches) >= 2:
-        params["iv"] = matches[1]
-    matches = re.findall(patterns["ciphertext"], html)
-    if len(matches) >= 3:
-        params["ciphertext"] = matches[2]
-    redirect_match = re.search(patterns["redirect"], html)
+
+    # Regex kamili kwa kila param
+    key_match = re.search(r'var\s+a\s*=\s*toNumbers\(["\']([0-9a-fA-F]+)["\']\)', html)
+    iv_match = re.search(r'var\s+b\s*=\s*toNumbers\(["\']([0-9a-fA-F]+)["\']\)', html)
+    cipher_match = re.search(r'var\s+c\s*=\s*toNumbers\(["\']([0-9a-fA-F]+)["\']\)', html)
+    redirect_match = re.search(r'location\.href\s*=\s*["\']([^"\']+)["\']', html)
+
+    if key_match:
+        params["key"] = key_match.group(1)
+    if iv_match:
+        params["iv"] = iv_match.group(1)
+    if cipher_match:
+        params["ciphertext"] = cipher_match.group(1)
     if redirect_match:
         params["redirect"] = redirect_match.group(1)
+
     return params
 
 def decrypt_cookie(key_hex: str, iv_hex: str, cipher_hex: str) -> str:
+    key_hex = sanitize_hex(key_hex)
+    iv_hex = sanitize_hex(iv_hex)
+    cipher_hex = sanitize_hex(cipher_hex)
+
     key = bytes.fromhex(key_hex)
     iv = bytes.fromhex(iv_hex)
     cipher = bytes.fromhex(cipher_hex)
+
     cipher_obj = AES.new(key, AES.MODE_CBC, iv)
     decrypted = cipher_obj.decrypt(cipher)
     return decrypted.hex()
@@ -176,14 +164,12 @@ async def solve_smart_challenge(client: httpx.AsyncClient, challenge_html: str) 
         "redirect_url": params["redirect"].replace("&amp;", "&")
     }
 
-# =========================
-# SMART REQUEST HANDLER
-# =========================
+# ===== SMART REQUEST HANDLER =====
 async def make_smart_request(method: str, url: str, **kwargs) -> httpx.Response:
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.request(method, url, **kwargs)
 
-        # Ikiwa kuna challenge
+        # Ikiwa kuna challenge ya JS
         if "aes.js" in response.text and "slowAES" in response.text:
             logging.info("JS challenge detected. Solving...")
             solution = await solve_smart_challenge(client, response.text)
@@ -195,9 +181,7 @@ async def make_smart_request(method: str, url: str, **kwargs) -> httpx.Response:
             response = await client.request(method, solution["redirect_url"], **kwargs)
     return response
 
-# =========================
-# DATABASE BRIDGE FUNCTIONS
-# =========================
+# ===== DATABASE BRIDGE =====
 async def save_transaction_to_db(user_id: str, transaction: Dict[str, Any]) -> Dict[str, Any]:
     try:
         payload = {"user_id": user_id, **transaction}
@@ -256,16 +240,12 @@ async def get_advice_from_summary(user_id: str) -> str:
         return "Tatizo lilitokea katika kusoma data ya ushauri."
     return "Bado hatuna data ya kutosha ya matumizi wiki hii."
 
-# =========================
-# MODELS
-# =========================
+# ===== MODELS =====
 class SMSPayload(BaseModel):
     user_id: str
     messages: List[str]
 
-# =========================
-# CORE LOGIC
-# =========================
+# ===== CORE LOGIC =====
 async def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
     service = detect_service(msg)
     parsed = parse_with_patterns(msg, service)
@@ -274,9 +254,7 @@ async def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
         return {"success": True, "data": parsed, "php_response": db_response}
     return {"success": False, "error": "Failed to parse message."}
 
-# =========================
-# ENDPOINTS
-# =========================
+# ===== ENDPOINTS =====
 @app.post("/analyze")
 async def analyze_sms(payload: SMSPayload):
     if not payload.user_id.strip():
@@ -316,11 +294,9 @@ async def php_test():
 
 @app.get("/")
 async def root():
-    return {"message": "MMTA Backend V15 - Smart Challenge Solver is running"}
+    return {"message": "MMTA Backend V15.0.0.0.1 - Fixed Hex Parsing running"}
 
-# =========================
-# ENTRY POINT
-# =========================
+# ===== ENTRY POINT =====
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
