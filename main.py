@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from collections import defaultdict
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
@@ -14,7 +14,7 @@ import httpx
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --------- FASTAPI APP INIT ---------
-app = FastAPI(title="MMTA Backend V10 - Fixed Database Integration")
+app = FastAPI(title="MMTA Backend V12 - PHP API Test Added")
 
 # --------- CORS SETUP ---------
 origins = [
@@ -117,7 +117,7 @@ def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
         return None
 
 # --------- DATABASE INTERACTION FUNCTIONS ---------
-async def save_transaction_to_db(user_id: str, transaction: Dict[str, Any]) -> bool:
+async def save_transaction_to_db(user_id: str, transaction: Dict[str, Any]) -> Dict[str, Any]:
     try:
         payload = {"user_id": user_id, **transaction}
         async with httpx.AsyncClient() as client:
@@ -127,21 +127,16 @@ async def save_transaction_to_db(user_id: str, transaction: Dict[str, Any]) -> b
                 timeout=30
             )
             response.raise_for_status()
-            result = response.json()
-            if result.get("status") == "success":
-                return True
-            else:
-                logging.error(f"Failed to save transaction: {result.get('message')}")
-                return False
+            return response.json()
     except httpx.HTTPStatusError as exc:
         logging.error(f"HTTP error: {exc.response.status_code} - {exc.response.text}")
-        return False
+        return {"status": "error", "message": f"HTTP {exc.response.status_code}"}
     except httpx.RequestError as exc:
         logging.error(f"Network error: {exc}")
-        return False
+        return {"status": "error", "message": "Network error"}
     except Exception as e:
         logging.error(f"Unexpected error: {e}")
-        return False
+        return {"status": "error", "message": "Unexpected error"}
 
 async def load_transactions_from_db(user_id: str) -> List[Dict[str, Any]]:
     try:
@@ -220,8 +215,8 @@ async def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
     service = detect_service(msg)
     parsed = parse_with_patterns(msg, service)
     if parsed:
-        success_db = await save_transaction_to_db(user_id, parsed)
-        return {"success": True, "data": parsed, "db_saved": success_db}
+        db_response = await save_transaction_to_db(user_id, parsed)
+        return {"success": True, "data": parsed, "php_response": db_response}
     return {"success": False, "error": "Failed to parse message."}
 
 # --------- ENDPOINTS ---------
@@ -245,9 +240,29 @@ async def analyze_sms(payload: SMSPayload):
         "total_messages_processed": len(payload.messages)
     }
 
+@app.get("/php-test")
+async def php_test():
+    """
+    Test connection with the PHP API and return its raw response.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(PHP_API_BASE_URL, timeout=30)
+            return {
+                "status": "success",
+                "php_status_code": response.status_code,
+                "php_response": response.text
+            }
+    except httpx.RequestError as exc:
+        logging.error(f"PHP API test failed: {exc}")
+        return {"status": "error", "message": "Unable to connect to PHP API."}
+    except Exception as e:
+        logging.error(f"Unexpected error during PHP test: {e}")
+        return {"status": "error", "message": "Unexpected error occurred."}
+
 @app.get("/")
 async def root():
-    return {"message": "MMTA Backend V10 - Fixed Database Integration"}
+    return {"message": "MMTA Backend V12 - PHP API Test Added"}
 
 if __name__ == "__main__":
     import uvicorn
