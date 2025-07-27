@@ -14,10 +14,11 @@ import httpx
 from Crypto.Cipher import AES
 
 # --------- LOGGING ---------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Set level to DEBUG to get more detailed output when things go wrong
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --------- FASTAPI APP INIT ---------
-app = FastAPI(title="MMTA Backend V14 - Challenge Bypass")
+app = FastAPI(title="MMTA Backend V14 - Challenge Bypass 001")
 
 # --------- CORS SETUP (keep your existing setup) ---------
 origins = [
@@ -109,39 +110,71 @@ def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
         return None
 
 # --------- 🤖 NEW: ANTI-BOT CHALLENGE SOLVER ---------
+# --------- 🤖 REVISED: ANTI-BOT CHALLENGE SOLVER (More Robust) ---------
 def solve_js_challenge(html_content: str) -> Optional[Dict[str, str]]:
     """
     Parses the JavaScript challenge HTML to extract parameters,
     decrypts them to find the cookie value, and returns the cookie and redirect URL.
+    This version is more robust with better error handling and logging.
     """
     try:
-        # 1. Extract hex values for a (key), b (iv), and c (ciphertext)
-        key_hex = re.search(r'var a=toNumbers\("([a-f0-9]+)"\)', html_content).group(1)
-        iv_hex = re.search(r'var b=toNumbers\("([a-f0-9]+)"\)', html_content).group(1)
-        ciphertext_hex = re.search(r'var c=toNumbers\("([a-f0-9]+)"\)', html_content).group(1)
-        
-        # 2. Extract the redirect URL
-        redirect_url = re.search(r'location.href="([^"]+)"', html_content).group(1)
-        
-        # Convert hex strings to bytes
+        # Define patterns with optional whitespace handling (\s*) to be more flexible
+        patterns = {
+            "key": r'var\s+a\s*=\s*toNumbers\("([a-f0-9]+)"\)',
+            "iv": r'var\s+b\s*=\s*toNumbers\("([a-f0-9]+)"\)',
+            "ciphertext": r'var\s+c\s*=\s*toNumbers\("([a-f0-9]+)"\)',
+            "redirect": r'location\.href\s*=\s*"([^"]+)"'
+        }
+
+        # Search for each pattern and handle failure gracefully
+        key_match = re.search(patterns["key"], html_content)
+        if not key_match:
+            logging.error("Challenge solve failed: Could not find key pattern 'a'.")
+            # The line below is crucial: it will print the HTML that caused the failure to your console.
+            logging.debug(f"Problematic HTML content:\n{html_content}")
+            return None
+        key_hex = key_match.group(1)
+
+        iv_match = re.search(patterns["iv"], html_content)
+        if not iv_match:
+            logging.error("Challenge solve failed: Could not find IV pattern 'b'.")
+            logging.debug(f"Problematic HTML content:\n{html_content}")
+            return None
+        iv_hex = iv_match.group(1)
+
+        ciphertext_match = re.search(patterns["ciphertext"], html_content)
+        if not ciphertext_match:
+            logging.error("Challenge solve failed: Could not find ciphertext pattern 'c'.")
+            logging.debug(f"Problematic HTML content:\n{html_content}")
+            return None
+        ciphertext_hex = ciphertext_match.group(1)
+
+        redirect_match = re.search(patterns["redirect"], html_content)
+        if not redirect_match:
+            logging.error("Challenge solve failed: Could not find redirect URL.")
+            logging.debug(f"Problematic HTML content:\n{html_content}")
+            return None
+        redirect_url = redirect_match.group(1)
+
+        # --- Decryption Logic (same as before) ---
         key = bytes.fromhex(key_hex)
         iv = bytes.fromhex(iv_hex)
         ciphertext = bytes.fromhex(ciphertext_hex)
-        
-        # 3. Perform AES decryption (CBC mode)
+
         cipher = AES.new(key, AES.MODE_CBC, iv)
         decrypted_bytes = cipher.decrypt(ciphertext)
-        
-        # The result might have padding; we convert the useful part to hex
         cookie_value = decrypted_bytes.hex()
         
+        logging.info("Successfully solved JS challenge.")
         return {
             "cookie_name": "__test",
             "cookie_value": cookie_value,
-            "redirect_url": redirect_url.replace("&amp;", "&") # Clean up HTML entities
+            "redirect_url": redirect_url.replace("&amp;", "&")
         }
     except Exception as e:
-        logging.error(f"Failed to solve JS challenge: {e}")
+        # This will catch other errors, e.g., if hex decoding fails
+        logging.error(f"An unexpected error occurred in solve_js_challenge: {e}")
+        logging.debug(f"Problematic HTML content:\n{html_content}")
         return None
 
 
