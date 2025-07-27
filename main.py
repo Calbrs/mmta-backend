@@ -10,10 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
 
+# --------- LOGGING ---------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-app = FastAPI(title="MMTA Backend - Enhanced API Integration Mmta")
+# --------- FASTAPI APP INIT ---------
+app = FastAPI(title="MMTA Backend V10 - Fixed Database Integration")
 
+# --------- CORS SETUP ---------
 origins = [
     "https://calcue.wuaze.com",
     "http://localhost",
@@ -21,30 +24,43 @@ origins = [
     "http://localhost:8000",
     "http://127.0.0.1:8000",
 ]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=[str(origin) for origin in origins],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# --------- DIRECTORY SETUP ---------
 DATA_DIR = "data"
 PATTERNS_FILE = os.path.join(DATA_DIR, "patterns.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
+# --------- PHP API URL ---------
 PHP_API_BASE_URL = "https://calcue.wuaze.com/mmta_api.php"
 
+# --------- JSON UTILS ---------
 def load_json(file_path: str) -> Dict[str, Any]:
     if os.path.exists(file_path):
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            logging.error(f"JSON load error: {e}")
+            logging.error(f"Failed to load JSON from {file_path}: {e}")
     return {}
 
+def save_json(data: Any, file_path: str):
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logging.error(f"Failed to save JSON to {file_path}: {e}")
+
+# --------- LOAD PATTERNS ---------
+patterns = load_json(PATTERNS_FILE)
+
+# --------- HELPERS ---------
 def try_float(value: Optional[str]) -> Optional[float]:
     try:
         return float(re.sub(r'[^\d.]', '', value)) if value else None
@@ -66,6 +82,7 @@ def detect_service(msg: str) -> str:
 def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
     service_patterns = patterns.get(service)
     if not service_patterns:
+        logging.warning(f"No patterns for service: {service}")
         return None
 
     extracted = {}
@@ -79,48 +96,52 @@ def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
                 return val
             return None
 
-        extracted.update({
-            "transaction_id": extract(service_patterns.get("transaction_id"), msg),
-            "date_time": extract(service_patterns.get("date_time"), msg),
-            "transaction_type": extract(service_patterns.get("transaction_type"), msg),
-            "amount": try_float(extract(service_patterns.get("amount"), msg)),
-            "currency": extract(service_patterns.get("currency"), msg),
-            "net_amount": try_float(extract(service_patterns.get("net_amount"), msg)),
-            "service": service,
-            "raw": msg
-        })
+        extracted["transaction_id"] = extract(service_patterns.get("transaction_id"), msg)
+        extracted["date_time"] = extract(service_patterns.get("date_time"), msg)
+        extracted["transaction_type"] = extract(service_patterns.get("transaction_type"), msg)
 
-        return {k: v for k, v in extracted.items() if v not in [None, "", {}]}
+        amount_str = extract(service_patterns.get("amount"), msg)
+        extracted["amount"] = try_float(amount_str) if amount_str else None
+
+        extracted["currency"] = extract(service_patterns.get("currency"), msg)
+        net_amount_str = extract(service_patterns.get("net_amount"), msg)
+        extracted["net_amount"] = try_float(net_amount_str) if net_amount_str else None
+
+        extracted["service"] = service
+        extracted["raw"] = msg
+
+        cleaned = {k: v for k, v in extracted.items() if v not in [None, "", {}]}
+        return cleaned if cleaned else None
     except re.error as e:
         logging.error(f"Regex error: {e}")
         return None
 
-async def verify_user(user_id: str) -> bool:
+# --------- DATABASE INTERACTION FUNCTIONS ---------
+async def save_transaction_to_db(user_id: str, transaction: Dict[str, Any]) -> bool:
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{PHP_API_BASE_URL}?action=check_user&user_id={user_id}",
-                timeout=10
-            )
-            response.raise_for_status()
-            return response.json().get("exists", False)
-    except Exception as e:
-        logging.error(f"User verification failed: {e}")
-        return False
-
-async def save_transaction_to_db(user_id: str, transaction: Dict[str, Any]) -> Dict[str, Any]:
-    try:
+        payload = {"user_id": user_id, **transaction}
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{PHP_API_BASE_URL}?action=save_transaction",
-                json={"user_id": user_id, **transaction},
+                json=payload,
                 timeout=30
             )
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            if result.get("status") == "success":
+                return True
+            else:
+                logging.error(f"Failed to save transaction: {result.get('message')}")
+                return False
+    except httpx.HTTPStatusError as exc:
+        logging.error(f"HTTP error: {exc.response.status_code} - {exc.response.text}")
+        return False
+    except httpx.RequestError as exc:
+        logging.error(f"Network error: {exc}")
+        return False
     except Exception as e:
-        logging.error(f"Transaction save failed: {e}")
-        return {"status": "error", "message": str(e)}
+        logging.error(f"Unexpected error: {e}")
+        return False
 
 async def load_transactions_from_db(user_id: str) -> List[Dict[str, Any]]:
     try:
@@ -130,13 +151,23 @@ async def load_transactions_from_db(user_id: str) -> List[Dict[str, Any]]:
                 timeout=30
             )
             response.raise_for_status()
-            data = response.json()
-            return data if isinstance(data, list) else []
+            transactions = response.json()
+            if isinstance(transactions, list):
+                return transactions
+            return []
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return []
+        logging.error(f"HTTP error: {exc.response.status_code} - {exc.response.text}")
+        return []
+    except httpx.RequestError as exc:
+        logging.error(f"Network error: {exc}")
+        return []
     except Exception as e:
-        logging.error(f"Transaction load failed: {e}")
+        logging.error(f"Unexpected error: {e}")
         return []
 
-async def get_user_summary(user_id: str) -> Dict[str, Any]:
+async def get_user_summary_from_db(user_id: str) -> Dict[str, Any]:
     transactions = await load_transactions_from_db(user_id)
     
     daily = defaultdict(float)
@@ -144,9 +175,11 @@ async def get_user_summary(user_id: str) -> Dict[str, Any]:
     monthly = defaultdict(float)
 
     for t in transactions:
+        if not t.get("amount") or not t.get("date_time"):
+            continue
         try:
-            amount = float(t.get("amount", 0))
-            dt = datetime.strptime(t["date_time"], "%Y-%m-%d %H:%M:%S")
+            amount = float(t["amount"])
+            dt = datetime.strptime(str(t["date_time"]), "%Y-%m-%d %H:%M:%S")
             daily[dt.strftime("%Y-%m-%d")] += amount
             weekly[f"week_{dt.strftime('%U_%Y')}"] += amount
             monthly[dt.strftime("%B_%Y")] += amount
@@ -157,95 +190,65 @@ async def get_user_summary(user_id: str) -> Dict[str, Any]:
         "daily": dict(daily),
         "weekly": dict(weekly),
         "monthly": dict(monthly),
-        "total_transactions": len(transactions)
     }
 
-def generate_advice(summary: Dict[str, Any]) -> str:
+async def get_advice_from_summary(user_id: str) -> str:
+    summary = await get_user_summary_from_db(user_id)
+    
     if not summary.get("weekly"):
-        return "Insufficient data for analysis"
+        return "Hakuna data ya kutosha kutoa ushauri."
 
     try:
-        latest_week = next(iter(sorted(summary["weekly"].items(), reverse=True)))
-        amount = latest_week[1]
-        if amount > 100000:
-            return f"High spending alert: {amount:,.2f} TZS this week"
-        return "Your spending patterns look normal"
+        latest_week_key = sorted(summary["weekly"].keys(), reverse=True)[0]
+        latest_spending = summary["weekly"][latest_week_key]
+        if latest_spending > 100000:
+            return f"Wiki hii umetumia {latest_spending:,.2f} TZS. Jaribu kupunguza matumizi."
+        elif latest_spending > 0:
+            return "Matumizi yako wiki hii yako sawa. Endelea kudhibiti gharama zako."
     except Exception:
-        return "Analysis unavailable"
+        return "Tatizo lilitokea katika kusoma data ya ushauri."
 
+    return "Bado hatuna data ya kutosha ya matumizi wiki hii."
+
+# --------- INPUT MODEL ---------
 class SMSPayload(BaseModel):
     user_id: str
     messages: List[str]
 
+# --------- CORE LOGIC ---------
+async def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
+    service = detect_service(msg)
+    parsed = parse_with_patterns(msg, service)
+    if parsed:
+        success_db = await save_transaction_to_db(user_id, parsed)
+        return {"success": True, "data": parsed, "db_saved": success_db}
+    return {"success": False, "error": "Failed to parse message."}
+
+# --------- ENDPOINTS ---------
 @app.post("/analyze")
 async def analyze_sms(payload: SMSPayload):
     if not payload.user_id.strip():
-        raise HTTPException(status_code=400, detail="User ID required")
+        raise HTTPException(status_code=400, detail="Missing or invalid 'user_id'.")
 
-    if not await verify_user(payload.user_id):
-        raise HTTPException(status_code=404, detail="User not found")
-
-    analysis = []
+    analysis_results = []
     for msg in payload.messages:
-        service = detect_service(msg)
-        parsed = parse_with_patterns(msg, service)
-        if parsed:
-            db_response = await save_transaction_to_db(payload.user_id, parsed)
-            analysis.append({
-                "status": "success",
-                "service": service,
-                "data": parsed,
-                "db_response": db_response
-            })
-        else:
-            analysis.append({
-                "status": "failed",
-                "message": "Unrecognized transaction format",
-                "raw": msg
-            })
-
-    summary = await get_user_summary(payload.user_id)
-    advice = generate_advice(summary)
+        result = await analyze_message(msg, payload.user_id)
+        analysis_results.append(result)
+    
+    summary = await get_user_summary_from_db(payload.user_id)
+    advice = await get_advice_from_summary(payload.user_id)
 
     return {
-        "user_id": payload.user_id,
-        "analysis": analysis,
+        "analysis": analysis_results,
         "summary": summary,
         "advice": advice,
-        "processed": len(payload.messages),
-        "successful": sum(1 for a in analysis if a["status"] == "success")
+        "total_messages_processed": len(payload.messages)
     }
 
-@app.get("/transactions/{user_id}")
-async def get_transactions(user_id: str):
-    transactions = await load_transactions_from_db(user_id)
-    summary = await get_user_summary(user_id)
-    return {
-        "user_id": user_id,
-        "count": len(transactions),
-        "transactions": transactions,
-        "summary": summary
-    }
-
-@app.get("/health")
-async def health_check():
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(PHP_API_BASE_URL, timeout=5)
-            php_status = response.status_code == 200
-        return {
-            "fastapi": "healthy",
-            "php_api": "healthy" if php_status else "unavailable",
-            "patterns_loaded": bool(patterns)
-        }
-    except Exception:
-        return {
-            "fastapi": "healthy",
-            "php_api": "unreachable",
-            "patterns_loaded": bool(patterns)
-        }
+@app.get("/")
+async def root():
+    return {"message": "MMTA Backend V10 - Fixed Database Integration"}
 
 if __name__ == "__main__":
-    patterns = load_json(PATTERNS_FILE)
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
