@@ -5,3 +5,6 @@ requests
 httpx
 playwright
 pycryptodome
+firebase-admin
+chromium
+python-dotenv
