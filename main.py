@@ -34,8 +34,15 @@ cred = credentials.Certificate(cred_path)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
+# ===== LOAD ANALYZE.JSON =====
+try:
+    with open("analyze.json", "r", encoding="utf-8") as f:
+        CLASSIFY_PATTERNS = json.load(f)
+except Exception as e:
+    raise RuntimeError(f"Failed to load analyze.json: {e}")
+
 # ===== FASTAPI APP =====
-app = FastAPI(title="MMTA Backend Simplified Firebase")
+app = FastAPI(title="MMTA Backend with Transaction Summary")
 
 # ===== CORS =====
 origins = [
@@ -58,6 +65,9 @@ class SMSPayload(BaseModel):
     user_id: str
     messages: List[str]
 
+class SummaryPayload(BaseModel):
+    user_id: str
+
 # ===== UTILS =====
 def detect_service(msg: str) -> str:
     lower = msg.lower()
@@ -73,27 +83,19 @@ def try_float(value: Optional[str]) -> Optional[float]:
     if not value:
         return None
     try:
-        # Remove commas and anything except digits and dot
         cleaned = re.sub(r"[^\d.]", "", value)
         return float(cleaned)
     except:
         return None
 
 def parse_message(msg: str) -> Dict[str, Any]:
-    # Extract transaction id (TID:...)
     tid_match = re.search(r"TID[:\s]*([A-Z0-9.\-]+)", msg, re.I)
     transaction_id = tid_match.group(1) if tid_match else None
 
-    # Determine transaction type: paid/received
     transaction_type = "paid" if "paid" in msg.lower() else "received"
-
-    # Extract amount (e.g. 1,000.00 Tsh)
     amount_match = re.search(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(Tsh|TZS)", msg, re.I)
     amount = try_float(amount_match.group(1)) if amount_match else None
-
-    # Currency hardcoded as TZS
     currency = "TZS" if amount else None
-
     service = detect_service(msg)
 
     return {
@@ -106,6 +108,16 @@ def parse_message(msg: str) -> Dict[str, Any]:
         "timestamp": datetime.utcnow()
     }
 
+def classify_transaction(msg: str) -> str:
+    msg = msg.lower()
+    for word in CLASSIFY_PATTERNS.get("incoming_keywords", []):
+        if word in msg:
+            return "incoming"
+    for word in CLASSIFY_PATTERNS.get("outgoing_keywords", []):
+        if word in msg:
+            return "outgoing"
+    return "unknown"
+
 # ===== FIREBASE SAVE =====
 def save_transaction(user_id: str, transaction: Dict[str, Any]) -> dict:
     try:
@@ -116,7 +128,27 @@ def save_transaction(user_id: str, transaction: Dict[str, Any]) -> dict:
         logging.error(f"Error saving to Firebase: {e}")
         return {"status": "error", "message": str(e)}
 
-# ===== API ENDPOINT =====
+# ===== ANALYZE SUMMARY =====
+def summarize_transactions(user_id: str) -> dict:
+    ref = db.collection("users").document(user_id).collection("transactions")
+    docs = ref.stream()
+
+    summary = {
+        "incoming": {"count": 0, "total": 0.0},
+        "outgoing": {"count": 0, "total": 0.0},
+        "unknown": {"count": 0, "total": 0.0}
+    }
+
+    for doc in docs:
+        data = doc.to_dict()
+        category = classify_transaction(data.get("raw", ""))
+        amt = data.get("amount") or 0.0
+        summary[category]["count"] += 1
+        summary[category]["total"] += amt
+
+    return summary
+
+# ===== API ENDPOINTS =====
 @app.post("/analyze")
 async def analyze_sms(payload: SMSPayload):
     if not payload.user_id.strip():
@@ -134,6 +166,17 @@ async def analyze_sms(payload: SMSPayload):
     return {
         "total_messages": len(payload.messages),
         "results": results
+    }
+
+@app.post("/analyze-summary")
+async def analyze_summary(payload: SummaryPayload):
+    if not payload.user_id.strip():
+        raise HTTPException(status_code=400, detail="Missing or invalid 'user_id'.")
+
+    summary = summarize_transactions(payload.user_id)
+    return {
+        "user_id": payload.user_id,
+        "summary": summary
     }
 
 # ===== RUN SERVER =====
