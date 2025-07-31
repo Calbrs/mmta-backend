@@ -153,13 +153,29 @@ def summarize_transactions(user_id: str) -> dict:
 # ===== API ENDPOINTS =====
 @app.post("/analyze")
 async def analyze_sms(payload: SMSPayload):
-    if not payload.user_id.strip():
+    user_id = payload.user_id.strip()
+    if not user_id:
         raise HTTPException(status_code=400, detail="Missing or invalid 'user_id'.")
+
+    # Check if user document exists in Firestore
+    user_doc_ref = db.collection("users").document(user_id)
+    try:
+        user_doc = user_doc_ref.get()
+    except Exception as e:
+        logging.error(f"Error fetching user document for user_id={user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error.")
+
+    if not user_doc.exists:
+        # User not found, decline saving transactions
+        raise HTTPException(status_code=404, detail="User ID not found. Cannot save transactions.")
+
+    # Optional: You can also check if the user_id matches a stored UID field inside the document,
+    # if you store UIDs inside user documents differently than the doc ID.
 
     results = []
     for msg in payload.messages:
         parsed = parse_message(msg)
-        save_result = save_transaction(payload.user_id, parsed)
+        save_result = save_transaction(user_id, parsed)
         results.append({
             "parsed": parsed,
             "save_result": save_result
