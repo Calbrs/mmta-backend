@@ -180,6 +180,11 @@ async def analyze_summary(payload: SummaryPayload):
         "summary": summary
     }
 
+@app.get("/")
+async def health_check():
+    return {"status": "ok", "message": "MMTA 0.0.3.6"}
+
+
 # ===== RUN SERVER =====
 if __name__ == "__main__":
     import uvicorn
