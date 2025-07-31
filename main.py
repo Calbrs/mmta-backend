@@ -181,8 +181,36 @@ async def analyze_summary(payload: SummaryPayload):
     }
 
 @app.get("/")
-async def health_check():
-    return {"status": "ok", "message": "MMTA 0.0.3.6"}
+async def health_check(request: Request):
+    user_id = request.query_params.get("user_id")
+
+    if not user_id or not user_id.strip():
+        return {
+            "status": "ok",
+            "message": "MMTA 0.0.3.6",
+            "user": "none_provided"
+        }
+
+    try:
+        doc_ref = db.collection("users").document(user_id)
+        doc = doc_ref.get()
+
+        if doc.exists:
+            return {
+                "status": "ok",
+                "message": "MMTA 0.0.3.6",
+                "user": "exists"
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Please create account",
+                "user": "not_found"
+            }
+
+    except Exception as e:
+        logging.error(f"Error checking user existence: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ===== RUN SERVER =====
