@@ -3,15 +3,15 @@ import re
 import json
 import logging
 from datetime import datetime
-from fastapi import Request
 from typing import List, Dict, Any, Optional
 
-import firebase_admin
-from firebase_admin import credentials, firestore
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 # ===== LOAD ENV =====
 load_dotenv()
@@ -25,7 +25,6 @@ if not FIREBASE_CRED_JSON:
     raise RuntimeError("Missing FIREBASE_CRED_JSON environment variable.")
 
 import tempfile
-
 with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as temp_cred_file:
     temp_cred_file.write(FIREBASE_CRED_JSON)
     temp_cred_file.flush()
@@ -45,7 +44,7 @@ except Exception as e:
 # ===== FASTAPI APP =====
 app = FastAPI(title="MMTA Backend with Transaction Summary")
 
-# ===== CORS =====
+# ===== CORS CONFIG =====
 origins = [
     "https://calcue.wuaze.com",
     "https://mmta.wuaze.com",
@@ -70,7 +69,15 @@ class SMSPayload(BaseModel):
 class SummaryPayload(BaseModel):
     user_id: str
 
-# ===== UTILS =====
+# ===== UTILITIES =====
+def validate_user(user_id: str) -> bool:
+    try:
+        doc = db.collection("users").document(user_id).get()
+        return doc.exists
+    except Exception as e:
+        logging.error(f"Error checking user ID: {e}")
+        return False
+
 def detect_service(msg: str) -> str:
     lower = msg.lower()
     if "mpesa" in lower:
@@ -120,17 +127,15 @@ def classify_transaction(msg: str) -> str:
             return "outgoing"
     return "unknown"
 
-# ===== FIREBASE SAVE =====
 def save_transaction(user_id: str, transaction: Dict[str, Any]) -> dict:
     try:
         doc_ref = db.collection("users").document(user_id).collection("transactions").add(transaction)
-        logging.info(f"Saved transaction for user {user_id} to Firebase with ref {doc_ref}")
+        logging.info(f"Saved transaction for user {user_id}")
         return {"status": "success", "firebase_ref": str(doc_ref)}
     except Exception as e:
         logging.error(f"Error saving to Firebase: {e}")
         return {"status": "error", "message": str(e)}
 
-# ===== ANALYZE SUMMARY =====
 def summarize_transactions(user_id: str) -> dict:
     ref = db.collection("users").document(user_id).collection("transactions")
     docs = ref.stream()
@@ -150,38 +155,26 @@ def summarize_transactions(user_id: str) -> dict:
 
     return summary
 
-# ===== API ENDPOINTS =====
+# ===== ENDPOINTS =====
 @app.post("/analyze")
 async def analyze_sms(payload: SMSPayload):
-    user_id = payload.user_id.strip()
-    if not user_id:
+    if not payload.user_id.strip():
         raise HTTPException(status_code=400, detail="Missing or invalid 'user_id'.")
 
-    # Check if user document exists in Firestore
-    user_doc_ref = db.collection("users").document(user_id)
-    try:
-        user_doc = user_doc_ref.get()
-    except Exception as e:
-        logging.error(f"Error fetching user document for user_id={user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error.")
-
-    if not user_doc.exists:
-        # User not found, decline saving transactions
-        raise HTTPException(status_code=404, detail="User ID not found. Cannot save transactions.")
-
-    # Optional: You can also check if the user_id matches a stored UID field inside the document,
-    # if you store UIDs inside user documents differently than the doc ID.
+    if not validate_user(payload.user_id):
+        raise HTTPException(status_code=404, detail="Sorry, no active account. Please create account.")
 
     results = []
     for msg in payload.messages:
         parsed = parse_message(msg)
-        save_result = save_transaction(user_id, parsed)
+        save_result = save_transaction(payload.user_id, parsed)
         results.append({
             "parsed": parsed,
             "save_result": save_result
         })
 
     return {
+        "user_id": payload.user_id,
         "total_messages": len(payload.messages),
         "results": results
     }
@@ -190,6 +183,9 @@ async def analyze_sms(payload: SMSPayload):
 async def analyze_summary(payload: SummaryPayload):
     if not payload.user_id.strip():
         raise HTTPException(status_code=400, detail="Missing or invalid 'user_id'.")
+
+    if not validate_user(payload.user_id):
+        raise HTTPException(status_code=404, detail="Sorry, no active account. Please create account.")
 
     summary = summarize_transactions(payload.user_id)
     return {
@@ -200,37 +196,15 @@ async def analyze_summary(payload: SummaryPayload):
 @app.get("/")
 async def health_check(request: Request):
     user_id = request.query_params.get("user_id")
-
     if not user_id or not user_id.strip():
-        return {
-            "status": "ok",
-            "message": "MMTA 0.0.3.6",
-            "user": "none_provided"
-        }
+        return {"status": "ok", "message": "MMTA 0.0.3.6", "user": "none_provided"}
 
-    try:
-        doc_ref = db.collection("users").document(user_id)
-        doc = doc_ref.get()
+    if validate_user(user_id):
+        return {"status": "ok", "message": "MMTA 0.0.3.6", "user": "exists"}
+    else:
+        return {"status": "error", "message": "Please create account", "user": "not_found"}
 
-        if doc.exists:
-            return {
-                "status": "ok",
-                "message": "MMTA 0.0.3.6",
-                "user": "exists"
-            }
-        else:
-            return {
-                "status": "error",
-                "message": "Please create account",
-                "user": "not_found"
-            }
-
-    except Exception as e:
-        logging.error(f"Error checking user existence: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-# ===== RUN SERVER =====
+# ===== RUN SERVER (Optional, for local dev) =====
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
