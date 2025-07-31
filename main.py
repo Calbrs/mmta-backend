@@ -47,6 +47,7 @@ app = FastAPI(title="MMTA Backend with Transaction Summary")
 # ===== CORS =====
 origins = [
     "https://calcue.wuaze.com",
+    "https://mmta.wuaze.com",
     "http://localhost",
     "http://127.0.0.1",
     "http://localhost:8000",
