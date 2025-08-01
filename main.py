@@ -69,6 +69,10 @@ class SMSPayload(BaseModel):
 class SummaryPayload(BaseModel):
     user_id: str
 
+class AdminPayload(BaseModel):
+    admin_id: str
+    messages: List[str]
+
 # ===== UTILITIES =====
 def validate_user(user_id: str) -> bool:
     try:
@@ -191,6 +195,22 @@ async def analyze_summary(payload: SummaryPayload):
     return {
         "user_id": payload.user_id,
         "summary": summary
+    }
+
+@app.post("/admin-analyze")
+async def admin_analyze(payload: AdminPayload):
+    if payload.admin_id != "Calbrs-36":
+        raise HTTPException(status_code=403, detail="Unauthorized admin access.")
+
+    results = []
+    for msg in payload.messages:
+        parsed = parse_message(msg)
+        results.append(parsed)
+
+    return {
+        "admin_id": payload.admin_id,
+        "total_messages": len(payload.messages),
+        "results": results
     }
 
 @app.get("/")
