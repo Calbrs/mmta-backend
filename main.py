@@ -34,12 +34,18 @@ cred = credentials.Certificate(cred_path)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# ===== LOAD ANALYZE.JSON =====
+# ===== LOAD CONFIG FILES =====
 try:
     with open("analyze.json", "r", encoding="utf-8") as f:
         CLASSIFY_PATTERNS = json.load(f)
 except Exception as e:
     raise RuntimeError(f"Failed to load analyze.json: {e}")
+
+try:
+    with open("pattern.json", "r", encoding="utf-8") as f:
+        PATTERN_RULES = json.load(f)
+except Exception as e:
+    raise RuntimeError(f"Failed to load pattern.json: {e}")
 
 # ===== FASTAPI APP =====
 app = FastAPI(title="MMTA Backend with Transaction Summary")
@@ -82,16 +88,6 @@ def validate_user(user_id: str) -> bool:
         logging.error(f"Error checking user ID: {e}")
         return False
 
-def detect_service(msg: str) -> str:
-    lower = msg.lower()
-    if "mpesa" in lower:
-        return "MPESA"
-    if "airtel" in lower:
-        return "AirtelMoney"
-    if "tigo" in lower:
-        return "TIGO"
-    return "Unknown"
-
 def try_float(value: Optional[str]) -> Optional[float]:
     if not value:
         return None
@@ -101,27 +97,51 @@ def try_float(value: Optional[str]) -> Optional[float]:
     except:
         return None
 
+def detect_service_from_json(msg: str) -> str:
+    lower = msg.lower()
+    for service, keywords in CLASSIFY_PATTERNS.get("services", {}).items():
+        for word in keywords:
+            if word in lower:
+                return service
+    return "Unknown"
+
+def classify_direction_from_json(msg: str) -> str:
+    lower = msg.lower()
+    for word in CLASSIFY_PATTERNS.get("classify", {}).get("incoming", []):
+        if word in lower:
+            return "incoming"
+    for word in CLASSIFY_PATTERNS.get("classify", {}).get("outgoing", []):
+        if word in lower:
+            return "outgoing"
+    return "unknown"
+
 def parse_message(msg: str) -> Dict[str, Any]:
-    tid_match = re.search(r"TID[:\s]*([A-Z0-9.\-]+)", msg, re.I)
-    transaction_id = tid_match.group(1) if tid_match else None
+    service = detect_service_from_json(msg)
+    direction = classify_direction_from_json(msg)
 
-    transaction_type = "paid" if "paid" in msg.lower() else "received"
-    amount_match = re.search(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(Tsh|TZS)", msg, re.I)
-    amount = try_float(amount_match.group(1)) if amount_match else None
-    currency = "TZS" if amount else None
-    service = detect_service(msg)
-
-    return {
-        "transaction_id": transaction_id,
-        "transaction_type": transaction_type,
-        "amount": amount,
-        "currency": currency,
+    parsed_data = {
         "service": service,
+        "direction": direction,
         "raw": msg,
         "timestamp": datetime.utcnow()
     }
 
+    # Apply regex patterns from pattern.json if available
+    if service in PATTERN_RULES and direction in PATTERN_RULES[service]:
+        patterns = PATTERN_RULES[service][direction]
+        for field, regex in patterns.items():
+            match = re.search(regex, msg, re.I)
+            if match:
+                value = match.group(1)
+                if field in ["amount", "balance"]:
+                    value = try_float(value)
+                parsed_data[field] = value
+
+    return parsed_data
+
 def classify_transaction(msg: str) -> str:
+    # This function is kept for backward compatibility with summarizing transactions
+    # You can decide to replace or unify with classify_direction_from_json
     msg = msg.lower()
     for word in CLASSIFY_PATTERNS.get("incoming_keywords", []):
         if word in msg:
