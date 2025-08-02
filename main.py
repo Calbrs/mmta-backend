@@ -34,16 +34,22 @@ cred = credentials.Certificate(cred_path)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# ===== LOAD CONFIG FILES =====
+# ===== LOAD JSON CONFIG FILES =====
+try:
+    with open("detect.json", "r", encoding="utf-8") as f:
+        DETECT = json.load(f)
+except Exception as e:
+    raise RuntimeError(f"Failed to load detect.json: {e}")
+
 try:
     with open("analyze.json", "r", encoding="utf-8") as f:
-        CLASSIFY_PATTERNS = json.load(f)
+        ANALYZE = json.load(f)
 except Exception as e:
     raise RuntimeError(f"Failed to load analyze.json: {e}")
 
 try:
     with open("pattern.json", "r", encoding="utf-8") as f:
-        PATTERN_RULES = json.load(f)
+        PATTERNS = json.load(f)
 except Exception as e:
     raise RuntimeError(f"Failed to load pattern.json: {e}")
 
@@ -97,27 +103,27 @@ def try_float(value: Optional[str]) -> Optional[float]:
     except:
         return None
 
-def detect_service_from_json(msg: str) -> str:
+def detect_service(msg: str) -> str:
     lower = msg.lower()
-    for service, keywords in CLASSIFY_PATTERNS.get("services", {}).items():
+    for service, keywords in DETECT.get("services", {}).items():
         for word in keywords:
             if word in lower:
                 return service
     return "Unknown"
 
-def classify_direction_from_json(msg: str) -> str:
+def classify_direction(msg: str) -> str:
     lower = msg.lower()
-    for word in CLASSIFY_PATTERNS.get("classify", {}).get("incoming", []):
+    for word in DETECT.get("classify", {}).get("incoming", []):
         if word in lower:
             return "incoming"
-    for word in CLASSIFY_PATTERNS.get("classify", {}).get("outgoing", []):
+    for word in DETECT.get("classify", {}).get("outgoing", []):
         if word in lower:
             return "outgoing"
     return "unknown"
 
 def parse_message(msg: str) -> Dict[str, Any]:
-    service = detect_service_from_json(msg)
-    direction = classify_direction_from_json(msg)
+    service = detect_service(msg)
+    direction = classify_direction(msg)
 
     parsed_data = {
         "service": service,
@@ -127,38 +133,28 @@ def parse_message(msg: str) -> Dict[str, Any]:
     }
 
     # Apply regex patterns from pattern.json if available
-    if service in PATTERN_RULES and direction in PATTERN_RULES[service]:
-        patterns = PATTERN_RULES[service][direction]
+    if service in PATTERNS and direction in PATTERNS[service]:
+        patterns = PATTERNS[service][direction]
         for field, regex in patterns.items():
-            match = re.search(regex, msg, re.I)
-            if match:
-                value = match.group(1)
-                if field in ["amount", "balance"]:
-                    value = try_float(value)
-                parsed_data[field] = value
+            # Skip nested dict like "charges" or "recipient"
+            if isinstance(regex, dict):
+                parsed_data[field] = {}
+                for subfield, subregex in regex.items():
+                    match = re.search(subregex, msg, re.I)
+                    if match:
+                        val = match.group(1)
+                        if subfield in ["amount", "balance", "total", "service_charge", "gov_levy", "net_amount"]:
+                            val = try_float(val)
+                        parsed_data[field][subfield] = val
+            else:
+                match = re.search(regex, msg, re.I)
+                if match:
+                    val = match.group(1)
+                    if field in ["amount", "balance", "total", "service_charge", "gov_levy", "net_amount"]:
+                        val = try_float(val)
+                    parsed_data[field] = val
 
     return parsed_data
-
-def classify_transaction(msg: str) -> str:
-    # This function is kept for backward compatibility with summarizing transactions
-    # You can decide to replace or unify with classify_direction_from_json
-    msg = msg.lower()
-    for word in CLASSIFY_PATTERNS.get("incoming_keywords", []):
-        if word in msg:
-            return "incoming"
-    for word in CLASSIFY_PATTERNS.get("outgoing_keywords", []):
-        if word in msg:
-            return "outgoing"
-    return "unknown"
-
-def save_transaction(user_id: str, transaction: Dict[str, Any]) -> dict:
-    try:
-        doc_ref = db.collection("users").document(user_id).collection("transactions").add(transaction)
-        logging.info(f"Saved transaction for user {user_id}")
-        return {"status": "success", "firebase_ref": str(doc_ref)}
-    except Exception as e:
-        logging.error(f"Error saving to Firebase: {e}")
-        return {"status": "error", "message": str(e)}
 
 def summarize_transactions(user_id: str) -> dict:
     ref = db.collection("users").document(user_id).collection("transactions")
@@ -172,12 +168,21 @@ def summarize_transactions(user_id: str) -> dict:
 
     for doc in docs:
         data = doc.to_dict()
-        category = classify_transaction(data.get("raw", ""))
+        category = classify_direction(data.get("raw", ""))
         amt = data.get("amount") or 0.0
         summary[category]["count"] += 1
         summary[category]["total"] += amt
 
     return summary
+
+def save_transaction(user_id: str, transaction: Dict[str, Any]) -> dict:
+    try:
+        doc_ref = db.collection("users").document(user_id).collection("transactions").add(transaction)
+        logging.info(f"Saved transaction for user {user_id}")
+        return {"status": "success", "firebase_ref": str(doc_ref)}
+    except Exception as e:
+        logging.error(f"Error saving to Firebase: {e}")
+        return {"status": "error", "message": str(e)}
 
 # ===== ENDPOINTS =====
 @app.post("/analyze")
