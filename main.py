@@ -42,13 +42,13 @@ except Exception as e:
     raise RuntimeError(f"Failed to load detect.json: {e}")
 
 try:
-    with open("analyze.json", "r", encoding="utf-8") as f:
+    with open("data/analyze.json", "r", encoding="utf-8") as f:
         ANALYZE = json.load(f)
 except Exception as e:
     raise RuntimeError(f"Failed to load analyze.json: {e}")
 
 try:
-    with open("pattern.json", "r", encoding="utf-8") as f:
+    with open("data/pattern.json", "r", encoding="utf-8") as f:
         PATTERNS = json.load(f)
 except Exception as e:
     raise RuntimeError(f"Failed to load pattern.json: {e}")
