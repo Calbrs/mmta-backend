@@ -2,7 +2,7 @@
   "services": {
     "MPESA": ["mpesa"],
     "AirtelMoney": ["airtel", "airtel money"],
-    "TIGO": ["tigo", "tigopesa","YATOSHA BUNDLE"]
+    "TIGO": ["TID"]
   },
   "classify": {
     "incoming": ["umepokea", "received", "credited"],
