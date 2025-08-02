@@ -1,11 +1,4 @@
 {
-  "services": {
-    "MPESA": ["mpesa"],
-    "AirtelMoney": ["airtel", "airtel money"],
-    "TIGO": ["tigo", "tigopesa"]
-  },
-  "classify": {
-    "incoming": ["umepokea", "received", "credited"],
-    "outgoing": ["umetuma", "umehamisha", "paid", "sent", "umelipia"]
-  }
+  "incoming_keywords": ["received", "deposit", "credited", "you have received", "umeingiziwa"],
+  "outgoing_keywords": ["paid", "sent", "withdrawn", "umepeleka", "imenunua", "you have paid"]
 }
