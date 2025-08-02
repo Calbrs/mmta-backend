@@ -3,22 +3,26 @@
     "incoming": {
       "transaction_id": "TID[:\\s]*([A-Z0-9.]+)",
       "date_time": "(\\d{2,4}[-/]\\d{1,2}[-/]\\d{1,2}[\\sT]\\d{1,2}:\\d{2}(:\\d{2})?)",
-      "amount": "(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)\\s*Tsh",
+      "comes_from": "\\b(Withdrawn|repaid|umelipa|paid|BUNDLE|loan)\\b",
+      "amount": "Received(?: loan of)? Tsh (\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
       "currency": "(Tsh|TZS|USD|EUR)",
-      "balance": "Balance\\s+([\\d,]+\\.\\d{2})\\s*Tsh",
+      "aimed_for": "(muda\\s+wa\\s+maongezi)",
+      "aimedaimed_amount": "Tsh\\s?(\\d{2,6}(?:,\\d{6})*(?:\\.\\d{4})?)",
+      "balance": "Balance Tsh (\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
       "recipient": {
         "name": "(?:from|kutoka)\\s+([A-Z][A-Za-z]+(?:\\s+[A-Z][A-Za-z]+)*)",
         "phone_number": "(\\d{9,12})",
         "agent_id": "Agent\\sID[:\\s]*([A-Z0-9]+)"
       },
-      "status": "(Successful|Failed|Pending|Declined)"
+      "status": "(Successful|Failed|Pending|Declined)"  
     },
     "outgoing": {
       "transaction_id": "TID[:\\s]*([A-Z0-9.]+)",
+      "used_for": "\\b(Withdrawn|repaid|umelipa|paid|BUNDLE|loan)\\b",
       "date_time": "(\\d{2,4}[-/]\\d{1,2}[-/]\\d{1,2}[\\sT]\\d{1,2}:\\d{2}(:\\d{2})?)",
       "amount": "(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)\\s*Tsh",
       "currency": "(Tsh|TZS|USD|EUR)",
-      "balance": "Balance\\s+([\\d,]+\\.\\d{2})\\s*Tsh",
+      "balance": "(?:Salio\\s*Tsh\\s*|Balance\\s*)(\\d+(?:,\\d{3})*(?:\\.\\d{2})?)\\s*Tsh?", 
       "charges": {
         "total": "Charges\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
         "service_charge": "Service\\scharge\\s*Tsh\\s*(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)",
