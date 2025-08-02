@@ -1,0 +1,11 @@
+{
+  "services": {
+    "MPESA": ["mpesa"],
+    "AirtelMoney": ["airtel", "airtel money"],
+    "TIGO": ["tigo", "tigopesa"]
+  },
+  "classify": {
+    "incoming": ["umepokea", "received", "credited"],
+    "outgoing": ["umetuma", "umehamisha", "paid", "sent", "umelipia"]
+  }
+}
