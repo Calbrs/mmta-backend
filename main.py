@@ -36,7 +36,7 @@ db = firestore.client()
 
 # ===== LOAD JSON CONFIG FILES =====
 try:
-    with open("detect.json", "r", encoding="utf-8") as f:
+    with open("data/detect.json", "r", encoding="utf-8") as f:
         DETECT = json.load(f)
 except Exception as e:
     raise RuntimeError(f"Failed to load detect.json: {e}")
