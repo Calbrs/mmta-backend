@@ -89,6 +89,10 @@ class AdminPayload(BaseModel):
     admin_id: str
     messages: List[str]
 
+class TransactionsByIdPayload(BaseModel):
+    user_id: str
+    transaction_ids: List[str]
+
 # ===== UTILITIES =====
 def validate_user(user_id: str) -> bool:
     try:
@@ -453,6 +457,36 @@ async def admin_analyze(payload: AdminPayload):
         "admin_id": payload.admin_id,
         "total_messages": len(payload.messages),
         "results": results
+    }
+
+@app.post("/transactions-by-ids")
+async def get_transactions_by_ids(payload: TransactionsByIdPayload):
+    if not payload.user_id.strip():
+        raise HTTPException(status_code=400, detail="Missing user_id")
+    if not validate_user(payload.user_id):
+        raise HTTPException(status_code=404, detail="Account not found")
+    if not payload.transaction_ids:
+        raise HTTPException(status_code=400, detail="No transaction_ids provided")
+
+    transactions = []
+    for doc_id in payload.transaction_ids:
+        try:
+            doc_ref = db.collection("users").document(payload.user_id).collection("transactions").document(doc_id)
+            doc = doc_ref.get()
+            if doc.exists:
+                transactions.append({
+                    "id": doc_id,
+                    "data": doc.to_dict()
+                })
+            else:
+                logging.warning(f"Transaction ID not found: {doc_id}")
+        except Exception as e:
+            logging.error(f"Error retrieving transaction {doc_id}: {e}")
+
+    return {
+        "user_id": payload.user_id,
+        "found": len(transactions),
+        "transactions": transactions
     }
 
 @app.get("/")
