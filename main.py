@@ -210,38 +210,6 @@ async def analyze_sms(payload: SMSPayload):
     }
 
 
-@app.get("/user-transactions")
-async def get_user_transactions(user_id: str):
-    if not user_id.strip():
-        raise HTTPException(status_code=400, detail="Missing or invalid 'user_id'.")
-
-    if not validate_user(user_id):
-        raise HTTPException(status_code=404, detail="User not found.")
-
-    try:
-        ref = db.collection("users").document(user_id).collection("transactions")
-        docs = ref.order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
-
-        transactions = []
-        async for doc in docs:  # Note: firestore client in Python does NOT support async iteration natively, so replace with sync iteration below
-            pass
-
-    except Exception as e:
-        logging.error(f"Error fetching transactions: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch transactions.")
-
-    # firestore Python client is sync, so:
-    try:
-        docs = ref.order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
-        transactions = [doc.to_dict() for doc in docs]
-    except Exception as e:
-        logging.error(f"Error fetching transactions: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch transactions.")
-
-    return JSONResponse(content=transactions)
-
-
-
 @app.post("/analyze-summary")
 async def analyze_summary(payload: SummaryPayload):
     if not payload.user_id.strip():
