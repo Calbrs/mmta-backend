@@ -19,6 +19,7 @@ from firebase_admin import exceptions as firebase_exceptions
 import httpx
 import asyncio
 
+
 # ===== LOAD ENV =====
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
