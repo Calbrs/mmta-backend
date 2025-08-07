@@ -19,6 +19,9 @@ from firebase_admin import exceptions as firebase_exceptions
 import httpx
 import asyncio
 
+from typing import List
+from fastapi import Query
+
 
 # ===== LOAD ENV =====
 load_dotenv()
@@ -92,6 +95,12 @@ class AdminPayload(BaseModel):
 class TransactionsByIdPayload(BaseModel):
     user_id: str
     transaction_ids: List[str]
+
+class TransactionListResponse(BaseModel):
+    user_id: str
+    total_transactions: int
+    transactions: List[Dict[str, Any]]
+    last_document_id: Optional[str] = None  # For pagination
 
 # ===== UTILITIES =====
 def validate_user(user_id: str) -> bool:
@@ -343,6 +352,65 @@ def summarize_transactions(user_id: str) -> dict:
             summary["unknown"]["total"] += amt
 
     return summary
+
+
+
+@app.get("/transactions", response_model=TransactionListResponse)
+async def get_transactions_by_user(
+    user_id: str = Query(..., description="The user ID to fetch transactions for"),
+    limit: int = Query(10, description="Number of transactions to return (1-100)", ge=1, le=100),
+    last_document_id: Optional[str] = Query(None, description="Last document ID for pagination")
+):
+    """
+    Get paginated list of transactions for a specific user.
+    
+    Parameters:
+    - user_id: Required user ID
+    - limit: Number of transactions to return (default: 10, max: 100)
+    - last_document_id: Optional last document ID for pagination
+    
+    Returns:
+    - List of transactions with pagination support
+    """
+    if not user_id.strip():
+        raise HTTPException(status_code=400, detail="Missing user_id")
+    if not validate_user(user_id):
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    try:
+        transactions_ref = db.collection("users").document(user_id).collection("transactions")
+        
+        # Start the query
+        query = transactions_ref.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
+        
+        # Apply pagination if last_document_id is provided
+        if last_document_id:
+            last_doc = transactions_ref.document(last_document_id).get()
+            if last_doc.exists:
+                query = query.start_after(last_doc)
+        
+        # Execute the query
+        docs = query.stream()
+        
+        transactions = []
+        last_doc = None
+        for doc in docs:
+            transactions.append({
+                "id": doc.id,
+                "data": doc.to_dict()
+            })
+            last_doc = doc
+        
+        return {
+            "user_id": user_id,
+            "total_transactions": len(transactions),
+            "transactions": transactions,
+            "last_document_id": last_doc.id if last_doc else None
+        }
+        
+    except Exception as e:
+        logging.error(f"Error fetching transactions: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch transactions")
 
 # ===== ENDPOINTS =====
 @app.post("/analyze")
