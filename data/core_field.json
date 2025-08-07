@@ -1,0 +1,10 @@
+{
+  "incoming": {
+    "required": ["amount"],
+    "optional": ["balance"]
+  },
+  "outgoing": {
+    "required": ["amount", "service", "balance"],
+    "optional": ["balance"]
+  }
+}
