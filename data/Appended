@@ -1,0 +1,15 @@
+{
+  "amount": "Tsh|TZS)\\\\s*([0-9,.]+)\\\\b",
+  "balance": "Balance is )(\\w+\\s*\\d+(?:,\\d+)*(?:\\.\\d+)?)\"",
+  "patterns": {
+    "MPESA": {
+      "outgoing": {
+        "amount": "Tsh(\\\\d+(?:,\\\\d{3})*(?:\\\\.\\\\d{2})?)",
+        "balance": "Balance\\\\s+is\\\\s+Tsh([\\\\d,.]+)"
+      }
+    }
+  },
+  "processed_ids": [
+    "BL13FO487RX"
+  ]
+}
