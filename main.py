@@ -2,6 +2,7 @@ import os
 import re
 import json
 import logging
+import hashlib
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -13,9 +14,14 @@ from dotenv import load_dotenv
 
 import firebase_admin
 from firebase_admin import credentials, firestore
+from firebase_admin import exceptions as firebase_exceptions
+
+import httpx
+import asyncio
 
 # ===== LOAD ENV =====
 load_dotenv()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ===== LOGGING =====
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,36 +31,32 @@ FIREBASE_CRED_JSON = os.getenv("FIREBASE_CRED_JSON")
 if not FIREBASE_CRED_JSON:
     raise RuntimeError("Missing FIREBASE_CRED_JSON environment variable.")
 
-import tempfile
-with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as temp_cred_file:
-    temp_cred_file.write(FIREBASE_CRED_JSON)
-    temp_cred_file.flush()
-    cred_path = temp_cred_file.name
-
-cred = credentials.Certificate(cred_path)
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+try:
+    cred_dict = json.loads(FIREBASE_CRED_JSON)
+    cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
+    cred = credentials.Certificate(cred_dict)
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+except Exception as e:
+    raise RuntimeError(f"Failed to initialize Firebase: {e}")
 
 # ===== LOAD JSON CONFIG FILES =====
+PATTERNS_PATH = "data/patterns.json"
+APPENDED_JSON_PATH = "data/Appended.json"
 try:
     with open("data/detect.json", "r", encoding="utf-8") as f:
         DETECT = json.load(f)
-except Exception as e:
-    raise RuntimeError(f"Failed to load detect.json: {e}")
-
-try:
     with open("data/analyze.json", "r", encoding="utf-8") as f:
         ANALYZE = json.load(f)
-except Exception as e:
-    raise RuntimeError(f"Failed to load analyze.json: {e}")
-
-try:
-    with open("data/patterns.json", "r", encoding="utf-8") as f:
+    with open(PATTERNS_PATH, "r", encoding="utf-8") as f:
         PATTERNS = json.load(f)
+    with open("data/core_field.json", "r", encoding="utf-8") as f:
+        CORE_FIELDS = json.load(f)
 except Exception as e:
-    raise RuntimeError(f"Failed to load pattern.json: {e}")
+    raise RuntimeError(f"Failed to load config files: {e}")
 
-# ===== FASTAPI APP =====
+IGNORE_KEYWORDS = ["muda wa maongezi", "airtime", "Transaction failed"]
+
 app = FastAPI(title="MMTA Backend with Transaction Summary")
 
 # ===== CORS CONFIG =====
@@ -91,18 +93,113 @@ def validate_user(user_id: str) -> bool:
     try:
         doc = db.collection("users").document(user_id).get()
         return doc.exists
+    except firebase_exceptions.FirebaseError as e:
+        logging.error(f"Firebase error checking user ID: {e}")
+        return False
     except Exception as e:
         logging.error(f"Error checking user ID: {e}")
         return False
 
 def try_float(value: Optional[str]) -> Optional[float]:
-    if not value:
+    if value is None:
         return None
     try:
-        cleaned = re.sub(r"[^\d.]", "", value)
+        cleaned = re.sub(r"[^\d.,]", "", str(value))
+        cleaned = cleaned.replace(',', '')
         return float(cleaned)
-    except:
+    except (ValueError, TypeError):
         return None
+
+def sms_contains_ignore_keywords(msg: str) -> bool:
+    lower = msg.lower()
+    return any(kw in lower for kw in IGNORE_KEYWORDS)
+
+def generate_transaction_id(msg: str) -> str:
+    return hashlib.sha1(msg.encode('utf-8')).hexdigest()
+
+def merge_regex(old_regex: str, new_regex: str) -> str:
+    if not old_regex:
+        return new_regex
+    if not new_regex:
+        return old_regex
+    return f"(?:{old_regex})|(?:{new_regex})"
+
+def save_merged_and_history_regex(
+    service: str, 
+    direction: str, 
+    transaction_id: str, 
+    missing_field: str, 
+    old_regex: str, 
+    new_regex_from_ai: str
+):
+    try:
+        with open(PATTERNS_PATH, "r", encoding="utf-8") as f:
+            patterns_data = json.load(f)
+        
+        if service not in patterns_data:
+            patterns_data[service] = {}
+        if direction not in patterns_data[service]:
+            patterns_data[service][direction] = {}
+
+        merged_regex = merge_regex(old_regex, new_regex_from_ai)
+        patterns_data[service][direction][missing_field] = merged_regex
+        
+        with open(PATTERNS_PATH, "w", encoding="utf-8") as f:
+            json.dump(patterns_data, f, indent=2, ensure_ascii=False)
+        logging.info(f"Merged regex for '{missing_field}' saved.")
+    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+        logging.error(f"Error updating patterns file: {e}")
+        return
+    
+    try:
+        try:
+            with open(APPENDED_JSON_PATH, "r", encoding="utf-8") as f:
+                appended_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            appended_data = {"processed_ids": [], "patterns": {}}
+        
+        if service not in appended_data["patterns"]:
+            appended_data["patterns"][service] = {}
+        if direction not in appended_data["patterns"][service]:
+            appended_data["patterns"][service][direction] = {}
+
+        history_entry = {
+            "old_regex": old_regex,
+            "new_regex_from_ai": new_regex_from_ai,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        if missing_field not in appended_data["patterns"][service][direction]:
+            appended_data["patterns"][service][direction][missing_field] = []
+        appended_data["patterns"][service][direction][missing_field].append(history_entry)
+
+        if transaction_id not in appended_data["processed_ids"]:
+            appended_data["processed_ids"].append(transaction_id)
+        
+        with open(APPENDED_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(appended_data, f, indent=2, ensure_ascii=False)
+        logging.info(f"Saved regex history for ID '{transaction_id}'.")
+    except Exception as e:
+        logging.error(f"Error saving history: {e}")
+
+def is_transaction_processed(transaction_id: str) -> bool:
+    try:
+        with open(APPENDED_JSON_PATH, "r", encoding="utf-8") as f:
+            appended_data = json.load(f)
+            return transaction_id in appended_data.get("processed_ids", [])
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+
+def check_core_fields(direction: str, parsed_data: Dict[str, Any]) -> Dict[str, Any]:
+    missing = []
+    required_fields = CORE_FIELDS.get(direction, {}).get("required", [])
+    for field in required_fields:
+        value = parsed_data.get(field)
+        if value is None or value == "":
+            missing.append(field)
+    return {
+        "missing": missing,
+        "all_present": len(missing) == 0
+    }
 
 def detect_service(msg: str) -> str:
     lower = msg.lower()
@@ -123,39 +220,100 @@ def classify_direction(msg: str) -> str:
     return "unknown"
 
 def parse_message(msg: str) -> Dict[str, Any]:
+    try:
+        with open(PATTERNS_PATH, "r", encoding="utf-8") as f:
+            current_patterns = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        current_patterns = PATTERNS
+        logging.error("Using in-memory patterns due to file error")
+
     service = detect_service(msg)
     direction = classify_direction(msg)
+    transaction_id = generate_transaction_id(msg)
 
     parsed_data = {
         "service": service,
         "direction": direction,
+        "transaction_id": transaction_id,
         "raw": msg,
-        "timestamp": datetime.utcnow()
+        "timestamp": datetime.utcnow().isoformat()
     }
 
-    # Apply regex patterns from pattern.json if available
-    if service in PATTERNS and direction in PATTERNS[service]:
-        patterns = PATTERNS[service][direction]
+    if service in current_patterns and direction in current_patterns[service]:
+        patterns = current_patterns[service][direction]
         for field, regex in patterns.items():
-            # Skip nested dict like "charges" or "recipient"
             if isinstance(regex, dict):
                 parsed_data[field] = {}
                 for subfield, subregex in regex.items():
                     match = re.search(subregex, msg, re.I)
                     if match:
-                        val = match.group(1)
+                        val = match.group(1).strip()
                         if subfield in ["amount", "balance", "total", "service_charge", "gov_levy", "net_amount"]:
                             val = try_float(val)
                         parsed_data[field][subfield] = val
             else:
                 match = re.search(regex, msg, re.I)
                 if match:
-                    val = match.group(1)
+                    val = match.group(1).strip()
                     if field in ["amount", "balance", "total", "service_charge", "gov_levy", "net_amount"]:
                         val = try_float(val)
                     parsed_data[field] = val
 
     return parsed_data
+
+# ===== GEMINI AI INTEGRATION =====
+async def query_gemini_flash_regex(message: str, missing_fields: List[str]) -> Dict[str, Any]:
+    if not GEMINI_API_KEY:
+        logging.error("Missing GEMINI_API_KEY")
+        return {field: "error: API key missing" for field in missing_fields}
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    results = {}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        async def fetch(field: str):
+            prompt = (
+                f"From the text below, generate a Python regex pattern to extract '{field}'.\n"
+                f"Requirements:\n"
+                f"1. Include exactly one capturing group for the value\n"
+                f"2. Escape special characters for JSON (double backslashes)\n"
+                f"3. Return ONLY the raw regex string\n\n"
+                f"Text:\n---\n{message}\n---"
+            )
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+            try:
+                resp = await client.post(url, headers=headers, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                
+                if data.get("candidates") and data["candidates"][0].get("content", {}).get("parts"):
+                    text_response = data["candidates"][0]["content"]["parts"][0].get("text", "").strip()
+                    cleaned_regex = re.sub(r"^`{1,3}(python|regex)?\s*|`{1,3}$", "", text_response).strip()
+                    results[field] = cleaned_regex
+                else:
+                    results[field] = "error: No valid content"
+            except httpx.RequestError as e:
+                results[field] = f"error: HTTP request failed - {e}"
+            except Exception as e:
+                results[field] = f"error: {str(e)}"
+
+        await asyncio.gather(*[fetch(field) for field in missing_fields])
+
+    return results
+
+def save_transaction(user_id: str, transaction: Dict[str, Any]) -> dict:
+    try:
+        doc_ref = db.collection("users").document(user_id).collection("transactions").add(transaction)
+        logging.info(f"Saved transaction for {user_id}")
+        return {"status": "success", "firebase_ref": str(doc_ref)}
+    except firebase_exceptions.FirebaseError as e:
+        logging.error(f"Firebase error: {e}")
+        return {"status": "error", "message": f"Firebase error: {e}"}
+    except Exception as e:
+        logging.error(f"General error: {e}")
+        return {"status": "error", "message": str(e)}
 
 def summarize_transactions(user_id: str) -> dict:
     ref = db.collection("users").document(user_id).collection("transactions")
@@ -169,37 +327,45 @@ def summarize_transactions(user_id: str) -> dict:
 
     for doc in docs:
         data = doc.to_dict()
-        category = classify_direction(data.get("raw", ""))
+        category = data.get("direction", "unknown")
         amt = data.get("amount") or 0.0
-        summary[category]["count"] += 1
-        summary[category]["total"] += amt
+        
+        if category in summary:
+            summary[category]["count"] += 1
+            summary[category]["total"] += amt
+        else:
+            summary["unknown"]["count"] += 1
+            summary["unknown"]["total"] += amt
 
     return summary
-
-def save_transaction(user_id: str, transaction: Dict[str, Any]) -> dict:
-    try:
-        doc_ref = db.collection("users").document(user_id).collection("transactions").add(transaction)
-        logging.info(f"Saved transaction for user {user_id}")
-        return {"status": "success", "firebase_ref": str(doc_ref)}
-    except Exception as e:
-        logging.error(f"Error saving to Firebase: {e}")
-        return {"status": "error", "message": str(e)}
 
 # ===== ENDPOINTS =====
 @app.post("/analyze")
 async def analyze_sms(payload: SMSPayload):
     if not payload.user_id.strip():
-        raise HTTPException(status_code=400, detail="Missing or invalid 'user_id'.")
-
+        raise HTTPException(status_code=400, detail="Missing user_id")
     if not validate_user(payload.user_id):
-        raise HTTPException(status_code=404, detail="Sorry, no active account. Please create account.")
+        raise HTTPException(status_code=404, detail="Account not found")
 
     results = []
     for msg in payload.messages:
+        if sms_contains_ignore_keywords(msg):
+            results.append({
+                "status": "ignored",
+                "reason": "Contains ignore keywords"
+            })
+            continue
+
         parsed = parse_message(msg)
-        save_result = save_transaction(payload.user_id, parsed)
+        core_check = check_core_fields(parsed.get("direction", "unknown"), parsed)
+        save_result = {"status": "skipped", "reason": "Missing core fields"}
+        
+        if core_check["all_present"]:
+            save_result = save_transaction(payload.user_id, parsed)
+        
         results.append({
             "parsed": parsed,
+            "core_fields_status": core_check,
             "save_result": save_result
         })
 
@@ -209,14 +375,12 @@ async def analyze_sms(payload: SMSPayload):
         "results": results
     }
 
-
 @app.post("/analyze-summary")
 async def analyze_summary(payload: SummaryPayload):
     if not payload.user_id.strip():
-        raise HTTPException(status_code=400, detail="Missing or invalid 'user_id'.")
-
+        raise HTTPException(status_code=400, detail="Missing user_id")
     if not validate_user(payload.user_id):
-        raise HTTPException(status_code=404, detail="Sorry, no active account. Please create account.")
+        raise HTTPException(status_code=404, detail="Account not found")
 
     summary = summarize_transactions(payload.user_id)
     return {
@@ -227,12 +391,62 @@ async def analyze_summary(payload: SummaryPayload):
 @app.post("/admin-analyze")
 async def admin_analyze(payload: AdminPayload):
     if payload.admin_id != "Calbrs-36":
-        raise HTTPException(status_code=403, detail="Unauthorized admin access.")
+        raise HTTPException(status_code=403, detail="Unauthorized")
 
     results = []
     for msg in payload.messages:
+        if sms_contains_ignore_keywords(msg):
+            results.append({"status": "ignored"})
+            continue
+
         parsed = parse_message(msg)
-        results.append(parsed)
+        transaction_id = parsed.get("transaction_id")
+        direction = parsed.get("direction", "unknown")
+        service = parsed.get("service", "unknown")
+        
+        if is_transaction_processed(transaction_id):
+            results.append({
+                "status": "skipped",
+                "reason": "Already processed",
+                "transaction_id": transaction_id
+            })
+            continue
+
+        core_check = check_core_fields(direction, parsed)
+        gemini_response = None
+        re_parsed = None
+        save_result = {"status": "not_saved"}
+
+        if not core_check["all_present"]:
+            missing_fields = core_check["missing"]
+            gemini_response = await query_gemini_flash_regex(msg, missing_fields)
+            
+            successful_patterns = {k: v for k, v in gemini_response.items() if v and not v.startswith("error:")}
+            
+            if successful_patterns:
+                current_patterns = PATTERNS.get(service, {}).get(direction, {})
+                for field, new_regex in successful_patterns.items():
+                    old_regex = current_patterns.get(field, "")
+                    save_merged_and_history_regex(
+                        service, direction, transaction_id, 
+                        field, old_regex, new_regex
+                    )
+
+                re_parsed = parse_message(msg)
+                re_core_check = check_core_fields(direction, re_parsed)
+                
+                if re_core_check["all_present"]:
+                    save_result = save_transaction(payload.admin_id, re_parsed)
+        else:
+            save_result = save_transaction(payload.admin_id, parsed)
+
+        results.append({
+            "parsed": parsed,
+            "core_fields_status": core_check,
+            "gemini_response": gemini_response,
+            "re_parsed": re_parsed,
+            "save_result": save_result
+        })
 
     return {
         "admin_id": payload.admin_id,
@@ -244,14 +458,40 @@ async def admin_analyze(payload: AdminPayload):
 async def health_check(request: Request):
     user_id = request.query_params.get("user_id")
     if not user_id or not user_id.strip():
-        return {"status": "ok", "message": "MMTA 0.0.3.6", "user": "none_provided"}
+        return {"status": "ok", "message": "MMTA 1.0.0", "user": "none"}
 
     if validate_user(user_id):
-        return {"status": "ok", "message": "MMTA 0.0.3.6", "user": "exists"}
+        return {"status": "ok", "message": "MMTA 1.0.0", "user": "exists"}
     else:
-        return {"status": "error", "message": "Please create account", "user": "not_found"}
+        return {"status": "error", "message": "Account required", "user": "not_found"}
 
-# ===== RUN SERVER (Optional, for local dev) =====
+# ===== INITIALIZATION =====
 if __name__ == "__main__":
     import uvicorn
+    # Create data directory if missing
+    if not os.path.exists('data'):
+        os.makedirs('data')
+    
+    # Initialize required JSON files
+    required_files = {
+        'detect.json': {},
+        'analyze.json': {},
+        'patterns.json': {},
+        'core_field.json': {
+            "incoming": {
+                "required": ["amount", "balance", "reference"]
+            },
+            "outgoing": {
+                "required": ["amount", "balance", "recipient"]
+            }
+        },
+        'Appended.json': {"processed_ids": [], "patterns": {}}
+    }
+    
+    for filename, default_content in required_files.items():
+        path = f'data/{filename}'
+        if not os.path.exists(path):
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(default_content, f, indent=2)
+    
     uvicorn.run(app, host="0.0.0.0", port=8000)
