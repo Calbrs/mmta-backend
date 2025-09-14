@@ -1,4 +1,4 @@
 {
   "incoming_keywords": ["received", "deposit", "credited", "you have received", "umeingiziwa"],
-  "outgoing_keywords": ["paid", "sent", "withdrawn", "umepeleka", "imenunua", "you have paid"]
+  "outgoing_keywords": ["paid", "sent", "withdrawn", "umepeleka", "imenunua", "you have paid", "umetuma"]
 }
