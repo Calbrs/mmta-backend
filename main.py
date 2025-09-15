@@ -3,7 +3,7 @@ import re
 import json
 import logging
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -21,7 +21,6 @@ import asyncio
 
 from typing import List
 from fastapi import Query
-
 
 # ===== LOAD ENV =====
 load_dotenv()
@@ -100,7 +99,7 @@ class TransactionListResponse(BaseModel):
     user_id: str
     total_transactions: int
     transactions: List[Dict[str, Any]]
-    last_document_id: Optional[str] = None  # For pagination
+    last_document_id: Optional[str] = None
 
 # ===== UTILITIES =====
 def validate_user(user_id: str) -> bool:
@@ -233,7 +232,50 @@ def classify_direction(msg: str) -> str:
             return "outgoing"
     return "unknown"
 
-def parse_message(msg: str) -> Dict[str, Any]:
+async def categorize_transaction_with_gemini(msg: str) -> str:
+    if not GEMINI_API_KEY:
+        logging.error("Missing GEMINI_API_KEY")
+        return "uncategorized"
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    
+    prompt = (
+        "Classify the following mobile money transaction SMS into one of these categories: "
+        "groceries, airtime, utilities, transport, education, health, other. "
+        "Return a JSON object with a single key 'category' and the category name as the value. "
+        "Use 'other' if no specific category fits. "
+        "Example: {\"category\": \"groceries\"}\n\n"
+        f"Text:\n---\n{msg}\n---"
+    )
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            if data.get("candidates") and data["candidates"][0].get("content", {}).get("parts"):
+                text_response = data["candidates"][0]["content"]["parts"][0].get("text", "").strip()
+                cleaned_response = re.sub(r"^`{1,3}(json)?\s*|`{1,3}$", "", text_response).strip()
+                try:
+                    result = json.loads(cleaned_response)
+                    return result.get("category", "other")
+                except json.JSONDecodeError:
+                    logging.error(f"Invalid JSON from Gemini: {cleaned_response}")
+                    return "other"
+            else:
+                logging.error("No valid content from Gemini")
+                return "other"
+        except httpx.RequestError as e:
+            logging.error(f"Gemini HTTP request failed: {e}")
+            return "other"
+        except Exception as e:
+            logging.error(f"Gemini error: {e}")
+            return "other"
+
+async def parse_message(msg: str) -> Dict[str, Any]:
     try:
         with open(PATTERNS_PATH, "r", encoding="utf-8") as f:
             current_patterns = json.load(f)
@@ -244,11 +286,13 @@ def parse_message(msg: str) -> Dict[str, Any]:
     service = detect_service(msg)
     direction = classify_direction(msg)
     transaction_id = generate_transaction_id(msg)
+    category = await categorize_transaction_with_gemini(msg)
 
     parsed_data = {
         "service": service,
         "direction": direction,
         "transaction_id": transaction_id,
+        "category": category,
         "raw": msg,
         "timestamp": datetime.utcnow().isoformat()
     }
@@ -275,7 +319,6 @@ def parse_message(msg: str) -> Dict[str, Any]:
 
     return parsed_data
 
-# ===== GEMINI AI INTEGRATION =====
 async def query_gemini_flash_regex(message: str, missing_fields: List[str]) -> Dict[str, Any]:
     if not GEMINI_API_KEY:
         logging.error("Missing GEMINI_API_KEY")
@@ -330,30 +373,86 @@ def save_transaction(user_id: str, transaction: Dict[str, Any]) -> dict:
         return {"status": "error", "message": str(e)}
 
 def summarize_transactions(user_id: str) -> dict:
+    # Create user-specific directory
+    user_dir = f"data/users/{user_id}"
+    try:
+        os.makedirs(user_dir, exist_ok=True)
+    except Exception as e:
+        logging.error(f"Failed to create directory {user_dir}: {e}")
+
     ref = db.collection("users").document(user_id).collection("transactions")
     docs = ref.stream()
 
     summary = {
-        "incoming": {"count": 0, "total": 0.0},
-        "outgoing": {"count": 0, "total": 0.0},
-        "unknown": {"count": 0, "total": 0.0}
+        "by_direction": {
+            "incoming": {"count": 0, "total": 0.0},
+            "outgoing": {"count": 0, "total": 0.0},
+            "unknown": {"count": 0, "total": 0.0}
+        },
+        "by_category": {
+            "groceries": {"count": 0, "total": 0.0},
+            "airtime": {"count": 0, "total": 0.0},
+            "utilities": {"count": 0, "total": 0.0},
+            "transport": {"count": 0, "total": 0.0},
+            "education": {"count": 0, "total": 0.0},
+            "health": {"count": 0, "total": 0.0},
+            "other": {"count": 0, "total": 0.0}
+        },
+        "by_week": {}
     }
 
     for doc in docs:
         data = doc.to_dict()
-        category = data.get("direction", "unknown")
+        direction = data.get("direction", "unknown")
+        category = data.get("category", "other")
         amt = data.get("amount") or 0.0
-        
-        if category in summary:
-            summary[category]["count"] += 1
-            summary[category]["total"] += amt
+        timestamp = datetime.fromisoformat(data.get("timestamp").replace("Z", "+00:00"))
+
+        # Aggregate by direction
+        if direction in summary["by_direction"]:
+            summary["by_direction"][direction]["count"] += 1
+            summary["by_direction"][direction]["total"] += amt
         else:
-            summary["unknown"]["count"] += 1
-            summary["unknown"]["total"] += amt
+            summary["by_direction"]["unknown"]["count"] += 1
+            summary["by_direction"]["unknown"]["total"] += amt
+
+        # Aggregate by category
+        if category in summary["by_category"]:
+            summary["by_category"][category]["count"] += 1
+            summary["by_category"][category]["total"] += amt
+        else:
+            summary["by_category"]["other"]["count"] += 1
+            summary["by_category"]["other"]["total"] += amt
+
+        # Aggregate by week
+        week_start = timestamp - timedelta(days=timestamp.weekday())
+        week_key = week_start.strftime("%Y-%m-%d")
+        if week_key not in summary["by_week"]:
+            summary["by_week"][week_key] = {
+                "incoming": {"count": 0, "total": 0.0},
+                "outgoing": {"count": 0, "total": 0.0},
+                "unknown": {"count": 0, "total": 0.0}
+            }
+        summary["by_week"][week_key][direction]["count"] += 1
+        summary["by_week"][week_key][direction]["total"] += amt
+
+    # Save summaries to JSON files
+    try:
+        with open(f"{user_dir}/by_direction.json", "w", encoding="utf-8") as f:
+            json.dump(summary["by_direction"], f, indent=2, ensure_ascii=False)
+        logging.info(f"Saved by_direction.json for user {user_id}")
+        
+        with open(f"{user_dir}/by_category.json", "w", encoding="utf-8") as f:
+            json.dump(summary["by_category"], f, indent=2, ensure_ascii=False)
+        logging.info(f"Saved by_category.json for user {user_id}")
+        
+        with open(f"{user_dir}/by_week.json", "w", encoding="utf-8") as f:
+            json.dump(summary["by_week"], f, indent=2, ensure_ascii=False)
+        logging.info(f"Saved by_week.json for user {user_id}")
+    except Exception as e:
+        logging.error(f"Failed to save summary JSON files for user {user_id}: {e}")
 
     return summary
-
-
 
 @app.get("/transactions", response_model=TransactionListResponse)
 async def get_transactions_by_user(
@@ -361,17 +460,6 @@ async def get_transactions_by_user(
     limit: int = Query(10, description="Number of transactions to return (1-100)", ge=1, le=100),
     last_document_id: Optional[str] = Query(None, description="Last document ID for pagination")
 ):
-    """
-    Get paginated list of transactions for a specific user.
-    
-    Parameters:
-    - user_id: Required user ID
-    - limit: Number of transactions to return (default: 10, max: 100)
-    - last_document_id: Optional last document ID for pagination
-    
-    Returns:
-    - List of transactions with pagination support
-    """
     if not user_id.strip():
         raise HTTPException(status_code=400, detail="Missing user_id")
     if not validate_user(user_id):
@@ -380,16 +468,13 @@ async def get_transactions_by_user(
     try:
         transactions_ref = db.collection("users").document(user_id).collection("transactions")
         
-        # Start the query
         query = transactions_ref.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
         
-        # Apply pagination if last_document_id is provided
         if last_document_id:
             last_doc = transactions_ref.document(last_document_id).get()
             if last_doc.exists:
                 query = query.start_after(last_doc)
         
-        # Execute the query
         docs = query.stream()
         
         transactions = []
@@ -429,7 +514,7 @@ async def analyze_sms(payload: SMSPayload):
             })
             continue
 
-        parsed = parse_message(msg)
+        parsed = await parse_message(msg)
         core_check = check_core_fields(parsed.get("direction", "unknown"), parsed)
         save_result = {"status": "skipped", "reason": "Missing core fields"}
         
@@ -472,7 +557,7 @@ async def admin_analyze(payload: AdminPayload):
             results.append({"status": "ignored"})
             continue
 
-        parsed = parse_message(msg)
+        parsed = await parse_message(msg)
         transaction_id = parsed.get("transaction_id")
         direction = parsed.get("direction", "unknown")
         service = parsed.get("service", "unknown")
@@ -505,7 +590,7 @@ async def admin_analyze(payload: AdminPayload):
                         field, old_regex, new_regex
                     )
 
-                re_parsed = parse_message(msg)
+                re_parsed = await parse_message(msg)
                 re_core_check = check_core_fields(direction, re_parsed)
                 
                 if re_core_check["all_present"]:
@@ -571,11 +656,9 @@ async def health_check(request: Request):
 # ===== INITIALIZATION =====
 if __name__ == "__main__":
     import uvicorn
-    # Create data directory if missing
     if not os.path.exists('data'):
         os.makedirs('data')
     
-    # Initialize required JSON files
     required_files = {
         'detect.json': {},
         'analyze.json': {},
