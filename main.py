@@ -1,76 +1,29 @@
+import json
 import os
 import re
-import json
 import logging
-import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime
+from collections import defaultdict
 from typing import List, Dict, Any, Optional
-
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from dotenv import load_dotenv
 
-import firebase_admin
-from firebase_admin import credentials, firestore
-from firebase_admin import exceptions as firebase_exceptions
-
-import httpx
-import asyncio
-
-from typing import List
-from fastapi import Query
-
-# ===== LOAD ENV =====
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-# ===== LOGGING =====
+# --------- LOGGING ---------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ===== FIREBASE INIT =====
-FIREBASE_CRED_JSON = os.getenv("FIREBASE_CRED_JSON")
-if not FIREBASE_CRED_JSON:
-    raise RuntimeError("Missing FIREBASE_CRED_JSON environment variable.")
+app = FastAPI(title="MMTA Backend V9 - Manual Pattern Learning")
 
-try:
-    cred_dict = json.loads(FIREBASE_CRED_JSON)
-    cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
-    cred = credentials.Certificate(cred_dict)
-    firebase_admin.initialize_app(cred)
-    db = firestore.client()
-except Exception as e:
-    raise RuntimeError(f"Failed to initialize Firebase: {e}")
-
-# ===== LOAD JSON CONFIG FILES =====
-PATTERNS_PATH = "data/patterns.json"
-APPENDED_JSON_PATH = "data/Appended.json"
-try:
-    with open("data/detect.json", "r", encoding="utf-8") as f:
-        DETECT = json.load(f)
-    with open("data/analyze.json", "r", encoding="utf-8") as f:
-        ANALYZE = json.load(f)
-    with open(PATTERNS_PATH, "r", encoding="utf-8") as f:
-        PATTERNS = json.load(f)
-    with open("data/core_field.json", "r", encoding="utf-8") as f:
-        CORE_FIELDS = json.load(f)
-except Exception as e:
-    raise RuntimeError(f"Failed to load config files: {e}")
-
-IGNORE_KEYWORDS = ["muda wa maongezi", "airtime", "Transaction failed"]
-
-app = FastAPI(title="MMTA Backend with Transaction Summary")
-
-# ===== CORS CONFIG =====
+# --------- CORS ---------
 origins = [
     "https://calcue.wuaze.com",
-    "https://mmta.wuaze.com",
     "http://localhost",
     "http://127.0.0.1",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
+    "null"
 ]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -79,605 +32,348 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ===== MODELS =====
+# --------- PATHS ---------
+DATA_DIR = "data"
+USER_DATA_DIR = os.path.join(DATA_DIR, "users")
+PATTERNS_FILE = os.path.join(DATA_DIR, "patterns.json")
+
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(USER_DATA_DIR, exist_ok=True)
+
+# --------- LOAD & SAVE UTILITIES ---------
+def load_json(file_path: str) -> Dict[str, Any]:
+    """Loads JSON data from a specified file path."""
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            logging.error(f"JSON decode error in {file_path}: {e}")
+            return {}
+    return {}
+
+def save_json(data: Dict[str, Any], file_path: str):
+    """Saves data as JSON to a specified file path."""
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except IOError as e:
+        logging.error(f"Failed to write to {file_path}: {e}")
+
+# Load patterns from patterns.json
+patterns = load_json(PATTERNS_FILE)
+
+# --------- UTILS ---------
+def try_float(value: Optional[str]) -> Optional[float]:
+    """Attempts to convert a string to a float, cleaning non-numeric characters first."""
+    try:
+        # Remove any characters that are not digits or a decimal point
+        return float(re.sub(r'[^\d.]', '', value)) if value else None
+    except ValueError:
+        return None
+
+def detect_service(msg: str) -> str:
+    """
+    Detects the service (e.g., MPESA, AirtelMoney, TIGO) based on the message content.
+    Prioritizes specific MPESA confirmation pattern and adds TIGO regex.
+    """
+    lower = msg.lower()
+
+    # --------- MPESA detection ---------
+    # Specific check for MPESA confirmation message format:
+    mpesa_specific_pattern = r"^[A-Z0-9]+\s+\(?(?:imethibitishwa|Confirmed)\)?\s*"
+    if re.search(mpesa_specific_pattern, msg, re.IGNORECASE):
+        return "MPESA"
+
+    # General keyword-based MPESA detection
+    if "mpesa" in lower:
+        return "MPESA"
+
+    # --------- AIRTEL detection ---------
+    if "airtel" in lower:
+        return "AirtelMoney"
+
+    # --------- TIGO detection ---------
+    # Specific pattern for TIGO messages with TID and "Received Tsh..."
+    # Example: "Received Tsh 45,000.00 from VODACOM - AMIMU KILOMONI - 754473460. Balance Tsh 46,602.25. TID:CI250517.2058.Y29364"
+    tigo_pattern = r"TID[:\s]*([A-Z0-9.]+)"  
+    if re.search(tigo_pattern, msg, re.IGNORECASE) or "tigo" in lower:
+        return "TIGO"
+
+    return "Unknown"
+
+def parse_with_patterns(msg: str, service: str) -> Optional[Dict[str, Any]]:
+    """
+    Parses the message by trying to extract all fields via the patterns dict for a specific service.
+    Filters out null, empty, or 'Unknown' values to return only meaningful data.
+    """
+    service_patterns = patterns.get(service)
+    if not service_patterns:
+        logging.warning(f"No patterns found for service: {service}")
+        return None
+
+    extracted_data = {}
+    try:
+        # Helper to extract and clean values from a regex match
+        def extract_and_clean(regex_pattern, message, default_value=""):
+            if not regex_pattern: # Handle cases where a specific pattern might be missing for a service
+                return None
+            match = re.search(regex_pattern, message, re.IGNORECASE)
+            value = match.group(1).strip() if match and match.group(1) else default_value
+            # Filter out empty strings, "Unknown", or default empty values
+            return value if value and value.lower() != "unknown" and value != default_value else None
+
+        # Extract simple fields
+        extracted_data["transaction_id"] = extract_and_clean(service_patterns.get("transaction_id"), msg)
+        extracted_data["date_time"] = extract_and_clean(service_patterns.get("date_time"), msg)
+        extracted_data["transaction_type"] = extract_and_clean(service_patterns.get("transaction_type"), msg)
+        
+        amount_str = extract_and_clean(service_patterns.get("amount"), msg)
+        extracted_data["amount"] = try_float(amount_str) if amount_str else None
+        
+        extracted_data["currency"] = extract_and_clean(service_patterns.get("currency"), msg)
+        
+        net_amount_str = extract_and_clean(service_patterns.get("net_amount"), msg)
+        extracted_data["net_amount"] = try_float(net_amount_str) if net_amount_str else None
+        
+        previous_balance_str = extract_and_clean(service_patterns.get("previous_balance"), msg)
+        extracted_data["previous_balance"] = try_float(previous_balance_str) if previous_balance_str else None
+        
+        balance_after_str = extract_and_clean(service_patterns.get("balance_after"), msg)
+        extracted_data["balance_after"] = try_float(balance_after_str) if balance_after_str else None
+        
+        extracted_data["service_reference"] = extract_and_clean(service_patterns.get("service_reference"), msg)
+        extracted_data["service_provider"] = extract_and_clean(service_patterns.get("service_provider"), msg)
+        extracted_data["channel"] = extract_and_clean(service_patterns.get("channel"), msg)
+        extracted_data["payment_method"] = extract_and_clean(service_patterns.get("payment_method"), msg)
+        extracted_data["location"] = extract_and_clean(service_patterns.get("location"), msg)
+        extracted_data["status"] = extract_and_clean(service_patterns.get("status"), msg)
+        extracted_data["transaction_relation"] = extract_and_clean(service_patterns.get("transaction_relation"), msg)
+        extracted_data["user_reference_note"] = extract_and_clean(service_patterns.get("user_reference_note"), msg)
+        
+        promotions_bonus_str = extract_and_clean(service_patterns.get("promotions_bonus"), msg)
+        extracted_data["promotions_bonus"] = try_float(promotions_bonus_str) if promotions_bonus_str else None
+        
+        extracted_data["auth_method"] = extract_and_clean(service_patterns.get("auth_method"), msg)
+        extracted_data["phone_number"] = extract_and_clean(service_patterns.get("phone_number"), msg)
+        extracted_data["participant"] = extract_and_clean(service_patterns.get("participant"), msg)
+
+
+        # Extract charges dict
+        charges_data = {}
+        charges_patterns = service_patterns.get("charges", {})
+        charges_total_str = extract_and_clean(charges_patterns.get("total"), msg)
+        charges_data["total"] = try_float(charges_total_str) if charges_total_str else None
+        
+        charges_service_charge_str = extract_and_clean(charges_patterns.get("service_charge"), msg)
+        charges_data["service_charge"] = try_float(charges_service_charge_str) if charges_service_charge_str else None
+        
+        charges_gov_levy_str = extract_and_clean(charges_patterns.get("gov_levy"), msg)
+        charges_data["gov_levy"] = try_float(charges_gov_levy_str) if charges_gov_levy_str else None
+        
+        # Only add charges if any sub-field has a value
+        if any(v is not None for v in charges_data.values()):
+            extracted_data["charges"] = charges_data
+        else:
+            extracted_data["charges"] = {} # Or omit entirely if you prefer
+
+        # Extract recipient dict
+        recipient_data = {}
+        recipient_patterns = service_patterns.get("recipient", {})
+        recipient_data["name"] = extract_and_clean(recipient_patterns.get("name"), msg)
+        recipient_data["phone_number"] = extract_and_clean(recipient_patterns.get("phone_number"), msg)
+        recipient_data["agent_id"] = extract_and_clean(recipient_patterns.get("agent_id"), msg)
+
+        # Only add recipient if any sub-field has a value
+        if any(v is not None for v in recipient_data.values()):
+            extracted_data["recipient"] = recipient_data
+        else:
+            extracted_data["recipient"] = {} # Or omit entirely if you prefer
+
+        extracted_data["service"] = service
+        extracted_data["raw"] = msg
+
+        # Final filtering: remove keys with None or empty string values
+        # This will iterate over all extracted_data and its nested dictionaries
+        def clean_dict(d):
+            return {k: v for k, v in d.items() if v is not None and v != "" and (not isinstance(v, dict) or clean_dict(v))}
+
+        cleaned_result = clean_dict(extracted_data)
+        
+        return cleaned_result if cleaned_result else None # Return None if nothing was extracted
+
+    except re.error as e:
+        logging.error(f"Regex error in parse_with_patterns for service {service}: {e}")
+        return None
+
+# --------- USER DATA ---------
+def save_transaction(user_id: str, transaction: Dict[str, Any]):
+    """Saves a parsed transaction for a specific user."""
+    user_dir = os.path.join(USER_DATA_DIR, user_id)
+    os.makedirs(user_dir, exist_ok=True)
+    path = os.path.join(user_dir, "transactions.json")
+    transactions = load_transactions(user_id)
+    transactions.append(transaction)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(transactions, f, indent=2)
+
+def load_transactions(user_id: str) -> List[Dict[str, Any]]:
+    """Loads all transactions for a specific user."""
+    path = os.path.join(USER_DATA_DIR, user_id, "transactions.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        logging.error(f"JSON decode error in user transactions for {user_id}. Returning empty list.")
+        return []
+
+def save_summary(user_id: str, summary: Dict[str, Any]):
+    """Saves the spending summary for a specific user."""
+    user_dir = os.path.join(USER_DATA_DIR, user_id)
+    os.makedirs(user_dir, exist_ok=True)
+    path = os.path.join(user_dir, "summary.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+def update_user_summary(user_id: str) -> Dict[str, Any]:
+    """Calculates and updates daily, weekly, and monthly spending summaries for a user."""
+    transactions = load_transactions(user_id)
+    daily = defaultdict(float)
+    weekly = defaultdict(float)
+    monthly = defaultdict(float)
+
+    for t in transactions:
+        if not t.get("amount") or not t.get("date_time"):
+            continue
+        try:
+            amount = float(t["amount"])
+            # Ensure the date_time format matches what's stored
+            dt = datetime.strptime(t["date_time"], "%Y-%m-%d %H:%M:%S")
+            daily[dt.strftime("%Y-%m-%d")] += amount
+            weekly[f"week_{dt.strftime('%U_%Y')}"] += amount
+            monthly[dt.strftime("%B_%Y")] += amount
+        except (ValueError, TypeError):
+            logging.warning(f"Could not process transaction for summary due to invalid amount or date_time: {t}")
+            continue
+
+    summary = {"daily": dict(daily), "weekly": dict(weekly), "monthly": dict(monthly)}
+    save_summary(user_id, summary)
+    return summary
+
+def get_manual_advice(user_id: str) -> str:
+    """Provides simple, non-AI financial advice based on user's spending summary."""
+    summary_path = os.path.join(USER_DATA_DIR, user_id, "summary.json")
+    if not os.path.exists(summary_path):
+        return "Hakuna data ya kutosha kutoa ushauri."
+
+    with open(summary_path, "r", encoding="utf-8") as f:
+        summary = json.load(f)
+
+    if summary.get("weekly"):
+        try:
+            # Sort weekly keys to get the most recent week's spending
+            latest_week_key = sorted(summary["weekly"].keys(), key=lambda x: (int(x.split('_')[2]), int(x.split('_')[1])), reverse=True)[0]
+            latest_week_spending = summary["weekly"][latest_week_key]
+        except (IndexError, ValueError):
+            return "Bado hatuna data ya kutosha ya matumizi wiki hii."
+
+        if latest_week_spending > 100000:
+            return f"Wiki hii umetumia {latest_week_spending:,.2f} TZS. Jaribu kupunguza matumizi."
+        elif latest_week_spending > 0:
+            return "Matumizi yako wiki hii yako sawa. Endelea kudhibiti gharama zako."
+
+    return "Bado hatuna data ya kutosha ya matumizi wiki hii."
+
+
+# --------- MAIN ANALYSIS ---------
 class SMSPayload(BaseModel):
     user_id: str
     messages: List[str]
 
-class SummaryPayload(BaseModel):
-    user_id: str
-
-class AdminPayload(BaseModel):
-    admin_id: str
-    messages: List[str]
-
-class TransactionsByIdPayload(BaseModel):
-    user_id: str
-    transaction_ids: List[str]
-
-class TransactionListResponse(BaseModel):
-    user_id: str
-    total_transactions: int
-    transactions: List[Dict[str, Any]]
-    last_document_id: Optional[str] = None
-
-# ===== UTILITIES =====
-def validate_user(user_id: str) -> bool:
-    try:
-        doc = db.collection("users").document(user_id).get()
-        return doc.exists
-    except firebase_exceptions.FirebaseError as e:
-        logging.error(f"Firebase error checking user ID: {e}")
-        return False
-    except Exception as e:
-        logging.error(f"Error checking user ID: {e}")
-        return False
-
-def try_float(value: Optional[str]) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        cleaned = re.sub(r"[^\d.,]", "", str(value))
-        cleaned = cleaned.replace(',', '')
-        return float(cleaned)
-    except (ValueError, TypeError):
-        return None
-
-def sms_contains_ignore_keywords(msg: str) -> bool:
-    lower = msg.lower()
-    return any(kw in lower for kw in IGNORE_KEYWORDS)
-
-def generate_transaction_id(msg: str) -> str:
-    return hashlib.sha1(msg.encode('utf-8')).hexdigest()
-
-def merge_regex(old_regex: str, new_regex: str) -> str:
-    if not old_regex:
-        return new_regex
-    if not new_regex:
-        return old_regex
-    return f"(?:{old_regex})|(?:{new_regex})"
-
-def save_merged_and_history_regex(
-    service: str, 
-    direction: str, 
-    transaction_id: str, 
-    missing_field: str, 
-    old_regex: str, 
-    new_regex_from_ai: str
-):
-    try:
-        with open(PATTERNS_PATH, "r", encoding="utf-8") as f:
-            patterns_data = json.load(f)
-        
-        if service not in patterns_data:
-            patterns_data[service] = {}
-        if direction not in patterns_data[service]:
-            patterns_data[service][direction] = {}
-
-        merged_regex = merge_regex(old_regex, new_regex_from_ai)
-        patterns_data[service][direction][missing_field] = merged_regex
-        
-        with open(PATTERNS_PATH, "w", encoding="utf-8") as f:
-            json.dump(patterns_data, f, indent=2, ensure_ascii=False)
-        logging.info(f"Merged regex for '{missing_field}' saved.")
-    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
-        logging.error(f"Error updating patterns file: {e}")
-        return
-    
-    try:
-        try:
-            with open(APPENDED_JSON_PATH, "r", encoding="utf-8") as f:
-                appended_data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            appended_data = {"processed_ids": [], "patterns": {}}
-        
-        if service not in appended_data["patterns"]:
-            appended_data["patterns"][service] = {}
-        if direction not in appended_data["patterns"][service]:
-            appended_data["patterns"][service][direction] = {}
-
-        history_entry = {
-            "old_regex": old_regex,
-            "new_regex_from_ai": new_regex_from_ai,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        if missing_field not in appended_data["patterns"][service][direction]:
-            appended_data["patterns"][service][direction][missing_field] = []
-        appended_data["patterns"][service][direction][missing_field].append(history_entry)
-
-        if transaction_id not in appended_data["processed_ids"]:
-            appended_data["processed_ids"].append(transaction_id)
-        
-        with open(APPENDED_JSON_PATH, "w", encoding="utf-8") as f:
-            json.dump(appended_data, f, indent=2, ensure_ascii=False)
-        logging.info(f"Saved regex history for ID '{transaction_id}'.")
-    except Exception as e:
-        logging.error(f"Error saving history: {e}")
-
-def is_transaction_processed(transaction_id: str) -> bool:
-    try:
-        with open(APPENDED_JSON_PATH, "r", encoding="utf-8") as f:
-            appended_data = json.load(f)
-            return transaction_id in appended_data.get("processed_ids", [])
-    except (FileNotFoundError, json.JSONDecodeError):
-        return False
-
-def check_core_fields(direction: str, parsed_data: Dict[str, Any]) -> Dict[str, Any]:
-    missing = []
-    required_fields = CORE_FIELDS.get(direction, {}).get("required", [])
-    for field in required_fields:
-        value = parsed_data.get(field)
-        if value is None or value == "":
-            missing.append(field)
-    return {
-        "missing": missing,
-        "all_present": len(missing) == 0
-    }
-
-def detect_service(msg: str) -> str:
-    lower = msg.lower()
-    for service, keywords in DETECT.get("services", {}).items():
-        for word in keywords:
-            if word in lower:
-                return service
-    return "Unknown"
-
-def classify_direction(msg: str) -> str:
-    lower = msg.lower()
-    for word in DETECT.get("classify", {}).get("incoming", []):
-        if word in lower:
-            return "incoming"
-    for word in DETECT.get("classify", {}).get("outgoing", []):
-        if word in lower:
-            return "outgoing"
-    return "unknown"
-
-async def categorize_transaction_with_gemini(msg: str) -> str:
-    if not GEMINI_API_KEY:
-        logging.error("Missing GEMINI_API_KEY")
-        return "uncategorized"
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-    
-    prompt = (
-        "Classify the following mobile money transaction SMS into one of these categories: "
-        "groceries, airtime, utilities, transport, education, health, other. "
-        "Return a JSON object with a single key 'category' and the category name as the value. "
-        "Use 'other' if no specific category fits. "
-        "Example: {\"category\": \"groceries\"}\n\n"
-        f"Text:\n---\n{msg}\n---"
-    )
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            resp = await client.post(url, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            
-            if data.get("candidates") and data["candidates"][0].get("content", {}).get("parts"):
-                text_response = data["candidates"][0]["content"]["parts"][0].get("text", "").strip()
-                cleaned_response = re.sub(r"^`{1,3}(json)?\s*|`{1,3}$", "", text_response).strip()
-                try:
-                    result = json.loads(cleaned_response)
-                    return result.get("category", "other")
-                except json.JSONDecodeError:
-                    logging.error(f"Invalid JSON from Gemini: {cleaned_response}")
-                    return "other"
-            else:
-                logging.error("No valid content from Gemini")
-                return "other"
-        except httpx.RequestError as e:
-            logging.error(f"Gemini HTTP request failed: {e}")
-            return "other"
-        except Exception as e:
-            logging.error(f"Gemini error: {e}")
-            return "other"
-
-async def parse_message(msg: str) -> Dict[str, Any]:
-    try:
-        with open(PATTERNS_PATH, "r", encoding="utf-8") as f:
-            current_patterns = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        current_patterns = PATTERNS
-        logging.error("Using in-memory patterns due to file error")
-
+def analyze_message(msg: str, user_id: str) -> Dict[str, Any]:
+    """
+    Analyzes a single SMS message, detects service, parses it using stored patterns,
+    and saves the transaction if successful.
+    """
     service = detect_service(msg)
-    direction = classify_direction(msg)
-    transaction_id = generate_transaction_id(msg)
-    category = await categorize_transaction_with_gemini(msg)
+    parsed = parse_with_patterns(msg, service)
 
-    parsed_data = {
-        "service": service,
-        "direction": direction,
-        "transaction_id": transaction_id,
-        "category": category,
-        "raw": msg,
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-    if service in current_patterns and direction in current_patterns[service]:
-        patterns = current_patterns[service][direction]
-        for field, regex in patterns.items():
-            if isinstance(regex, dict):
-                parsed_data[field] = {}
-                for subfield, subregex in regex.items():
-                    match = re.search(subregex, msg, re.I)
-                    if match:
-                        val = match.group(1).strip()
-                        if subfield in ["amount", "balance", "total", "service_charge", "gov_levy", "net_amount"]:
-                            val = try_float(val)
-                        parsed_data[field][subfield] = val
-            else:
-                match = re.search(regex, msg, re.I)
-                if match:
-                    val = match.group(1).strip()
-                    if field in ["amount", "balance", "total", "service_charge", "gov_levy", "net_amount"]:
-                        val = try_float(val)
-                    parsed_data[field] = val
-
-    return parsed_data
-
-async def query_gemini_flash_regex(message: str, missing_fields: List[str]) -> Dict[str, Any]:
-    if not GEMINI_API_KEY:
-        logging.error("Missing GEMINI_API_KEY")
-        return {field: "error: API key missing" for field in missing_fields}
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-    results = {}
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        async def fetch(field: str):
-            prompt = (
-                f"From the text below, generate a Python regex pattern to extract '{field}'.\n"
-                f"Requirements:\n"
-                f"1. Include exactly one capturing group for the value\n"
-                f"2. Escape special characters for JSON (double backslashes)\n"
-                f"3. Return ONLY the raw regex string\n\n"
-                f"Text:\n---\n{message}\n---"
-            )
-            payload = {"contents": [{"parts": [{"text": prompt}]}]}
-
-            try:
-                resp = await client.post(url, headers=headers, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                
-                if data.get("candidates") and data["candidates"][0].get("content", {}).get("parts"):
-                    text_response = data["candidates"][0]["content"]["parts"][0].get("text", "").strip()
-                    cleaned_regex = re.sub(r"^`{1,3}(python|regex)?\s*|`{1,3}$", "", text_response).strip()
-                    results[field] = cleaned_regex
-                else:
-                    results[field] = "error: No valid content"
-            except httpx.RequestError as e:
-                results[field] = f"error: HTTP request failed - {e}"
-            except Exception as e:
-                results[field] = f"error: {str(e)}"
-
-        await asyncio.gather(*[fetch(field) for field in missing_fields])
-
-    return results
-
-def save_transaction(user_id: str, transaction: Dict[str, Any]) -> dict:
-    try:
-        doc_ref = db.collection("users").document(user_id).collection("transactions").add(transaction)
-        logging.info(f"Saved transaction for {user_id}")
-        return {"status": "success", "firebase_ref": str(doc_ref)}
-    except firebase_exceptions.FirebaseError as e:
-        logging.error(f"Firebase error: {e}")
-        return {"status": "error", "message": f"Firebase error: {e}"}
-    except Exception as e:
-        logging.error(f"General error: {e}")
-        return {"status": "error", "message": str(e)}
-
-def summarize_transactions(user_id: str) -> dict:
-    # Create user-specific directory
-    user_dir = f"data/users/{user_id}"
-    try:
-        os.makedirs(user_dir, exist_ok=True)
-    except Exception as e:
-        logging.error(f"Failed to create directory {user_dir}: {e}")
-
-    ref = db.collection("users").document(user_id).collection("transactions")
-    docs = ref.stream()
-
-    summary = {
-        "by_direction": {
-            "incoming": {"count": 0, "total": 0.0},
-            "outgoing": {"count": 0, "total": 0.0},
-            "unknown": {"count": 0, "total": 0.0}
-        },
-        "by_category": {
-            "groceries": {"count": 0, "total": 0.0},
-            "airtime": {"count": 0, "total": 0.0},
-            "utilities": {"count": 0, "total": 0.0},
-            "transport": {"count": 0, "total": 0.0},
-            "education": {"count": 0, "total": 0.0},
-            "health": {"count": 0, "total": 0.0},
-            "other": {"count": 0, "total": 0.0}
-        },
-        "by_week": {}
-    }
-
-    for doc in docs:
-        data = doc.to_dict()
-        direction = data.get("direction", "unknown")
-        category = data.get("category", "other")
-        amt = data.get("amount") or 0.0
-        timestamp = datetime.fromisoformat(data.get("timestamp").replace("Z", "+00:00"))
-
-        # Aggregate by direction
-        if direction in summary["by_direction"]:
-            summary["by_direction"][direction]["count"] += 1
-            summary["by_direction"][direction]["total"] += amt
-        else:
-            summary["by_direction"]["unknown"]["count"] += 1
-            summary["by_direction"]["unknown"]["total"] += amt
-
-        # Aggregate by category
-        if category in summary["by_category"]:
-            summary["by_category"][category]["count"] += 1
-            summary["by_category"][category]["total"] += amt
-        else:
-            summary["by_category"]["other"]["count"] += 1
-            summary["by_category"]["other"]["total"] += amt
-
-        # Aggregate by week
-        week_start = timestamp - timedelta(days=timestamp.weekday())
-        week_key = week_start.strftime("%Y-%m-%d")
-        if week_key not in summary["by_week"]:
-            summary["by_week"][week_key] = {
-                "incoming": {"count": 0, "total": 0.0},
-                "outgoing": {"count": 0, "total": 0.0},
-                "unknown": {"count": 0, "total": 0.0}
-            }
-        summary["by_week"][week_key][direction]["count"] += 1
-        summary["by_week"][week_key][direction]["total"] += amt
-
-    # Save summaries to JSON files
-    try:
-        with open(f"{user_dir}/by_direction.json", "w", encoding="utf-8") as f:
-            json.dump(summary["by_direction"], f, indent=2, ensure_ascii=False)
-        logging.info(f"Saved by_direction.json for user {user_id}")
-        
-        with open(f"{user_dir}/by_category.json", "w", encoding="utf-8") as f:
-            json.dump(summary["by_category"], f, indent=2, ensure_ascii=False)
-        logging.info(f"Saved by_category.json for user {user_id}")
-        
-        with open(f"{user_dir}/by_week.json", "w", encoding="utf-8") as f:
-            json.dump(summary["by_week"], f, indent=2, ensure_ascii=False)
-        logging.info(f"Saved by_week.json for user {user_id}")
-    except Exception as e:
-        logging.error(f"Failed to save summary JSON files for user {user_id}: {e}")
-
-    return summary
-
-@app.get("/transactions", response_model=TransactionListResponse)
-async def get_transactions_by_user(
-    user_id: str = Query(..., description="The user ID to fetch transactions for"),
-    limit: int = Query(10, description="Number of transactions to return (1-100)", ge=1, le=100),
-    last_document_id: Optional[str] = Query(None, description="Last document ID for pagination")
-):
-    if not user_id.strip():
-        raise HTTPException(status_code=400, detail="Missing user_id")
-    if not validate_user(user_id):
-        raise HTTPException(status_code=404, detail="Account not found")
-
-    try:
-        transactions_ref = db.collection("users").document(user_id).collection("transactions")
-        
-        query = transactions_ref.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
-        
-        if last_document_id:
-            last_doc = transactions_ref.document(last_document_id).get()
-            if last_doc.exists:
-                query = query.start_after(last_doc)
-        
-        docs = query.stream()
-        
-        transactions = []
-        last_doc = None
-        for doc in docs:
-            transactions.append({
-                "id": doc.id,
-                "data": doc.to_dict()
-            })
-            last_doc = doc
-        
-        return {
-            "user_id": user_id,
-            "total_transactions": len(transactions),
-            "transactions": transactions,
-            "last_document_id": last_doc.id if last_doc else None
-        }
-        
-    except Exception as e:
-        logging.error(f"Error fetching transactions: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch transactions")
-
-# ===== ENDPOINTS =====
-@app.post("/analyze")
-async def analyze_sms(payload: SMSPayload):
-    if not payload.user_id.strip():
-        raise HTTPException(status_code=400, detail="Missing user_id")
-    if not validate_user(payload.user_id):
-        raise HTTPException(status_code=404, detail="Account not found")
-
-    results = []
-    for msg in payload.messages:
-        if sms_contains_ignore_keywords(msg):
-            results.append({
-                "status": "ignored",
-                "reason": "Contains ignore keywords"
-            })
-            continue
-
-        parsed = await parse_message(msg)
-        core_check = check_core_fields(parsed.get("direction", "unknown"), parsed)
-        save_result = {"status": "skipped", "reason": "Missing core fields"}
-        
-        if core_check["all_present"]:
-            save_result = save_transaction(payload.user_id, parsed)
-        
-        results.append({
-            "parsed": parsed,
-            "core_fields_status": core_check,
-            "save_result": save_result
-        })
-
-    return {
-        "user_id": payload.user_id,
-        "total_messages": len(payload.messages),
-        "results": results
-    }
-
-@app.post("/analyze-summary")
-async def analyze_summary(payload: SummaryPayload):
-    if not payload.user_id.strip():
-        raise HTTPException(status_code=400, detail="Missing user_id")
-    if not validate_user(payload.user_id):
-        raise HTTPException(status_code=404, detail="Account not found")
-
-    summary = summarize_transactions(payload.user_id)
-    return {
-        "user_id": payload.user_id,
-        "summary": summary
-    }
-
-@app.post("/admin-analyze")
-async def admin_analyze(payload: AdminPayload):
-    if payload.admin_id != "Calbrs-36":
-        raise HTTPException(status_code=403, detail="Unauthorized")
-
-    results = []
-    for msg in payload.messages:
-        if sms_contains_ignore_keywords(msg):
-            results.append({"status": "ignored"})
-            continue
-
-        parsed = await parse_message(msg)
-        transaction_id = parsed.get("transaction_id")
-        direction = parsed.get("direction", "unknown")
-        service = parsed.get("service", "unknown")
-        
-        if is_transaction_processed(transaction_id):
-            results.append({
-                "status": "skipped",
-                "reason": "Already processed",
-                "transaction_id": transaction_id
-            })
-            continue
-
-        core_check = check_core_fields(direction, parsed)
-        gemini_response = None
-        re_parsed = None
-        save_result = {"status": "not_saved"}
-
-        if not core_check["all_present"]:
-            missing_fields = core_check["missing"]
-            gemini_response = await query_gemini_flash_regex(msg, missing_fields)
-            
-            successful_patterns = {k: v for k, v in gemini_response.items() if v and not v.startswith("error:")}
-            
-            if successful_patterns:
-                current_patterns = PATTERNS.get(service, {}).get(direction, {})
-                for field, new_regex in successful_patterns.items():
-                    old_regex = current_patterns.get(field, "")
-                    save_merged_and_history_regex(
-                        service, direction, transaction_id, 
-                        field, old_regex, new_regex
-                    )
-
-                re_parsed = await parse_message(msg)
-                re_core_check = check_core_fields(direction, re_parsed)
-                
-                if re_core_check["all_present"]:
-                    save_result = save_transaction(payload.admin_id, re_parsed)
-        else:
-            save_result = save_transaction(payload.admin_id, parsed)
-
-        results.append({
-            "parsed": parsed,
-            "core_fields_status": core_check,
-            "gemini_response": gemini_response,
-            "re_parsed": re_parsed,
-            "save_result": save_result
-        })
-
-    return {
-        "admin_id": payload.admin_id,
-        "total_messages": len(payload.messages),
-        "results": results
-    }
-
-@app.post("/transactions-by-ids")
-async def get_transactions_by_ids(payload: TransactionsByIdPayload):
-    if not payload.user_id.strip():
-        raise HTTPException(status_code=400, detail="Missing user_id")
-    if not validate_user(payload.user_id):
-        raise HTTPException(status_code=404, detail="Account not found")
-    if not payload.transaction_ids:
-        raise HTTPException(status_code=400, detail="No transaction_ids provided")
-
-    transactions = []
-    for doc_id in payload.transaction_ids:
-        try:
-            doc_ref = db.collection("users").document(payload.user_id).collection("transactions").document(doc_id)
-            doc = doc_ref.get()
-            if doc.exists:
-                transactions.append({
-                    "id": doc_id,
-                    "data": doc.to_dict()
-                })
-            else:
-                logging.warning(f"Transaction ID not found: {doc_id}")
-        except Exception as e:
-            logging.error(f"Error retrieving transaction {doc_id}: {e}")
-
-    return {
-        "user_id": payload.user_id,
-        "found": len(transactions),
-        "transactions": transactions
-    }
-
-@app.get("/")
-async def health_check(request: Request):
-    user_id = request.query_params.get("user_id")
-    if not user_id or not user_id.strip():
-        return {"status": "ok", "message": "MMTA 1.0.0", "user": "none"}
-
-    if validate_user(user_id):
-        return {"status": "ok", "message": "MMTA 1.0.0", "user": "exists"}
+    if parsed:
+        save_transaction(user_id, parsed)
+        return {"success": True, "source": "local", "data": parsed}
     else:
-        return {"status": "error", "message": "Account required", "user": "not_found"}
+        logging.info(f"Failed to parse message: '{msg}' with service '{service}'.")
+        return {"success": False, "error": "Failed to parse message using available patterns."}
 
-# ===== INITIALIZATION =====
-if __name__ == "__main__":
-    import uvicorn
-    if not os.path.exists('data'):
-        os.makedirs('data')
-    
-    required_files = {
-        'detect.json': {},
-        'analyze.json': {},
-        'patterns.json': {},
-        'core_field.json': {
-            "incoming": {
-                "required": ["amount", "balance", "reference"]
-            },
-            "outgoing": {
-                "required": ["amount", "balance", "recipient"]
-            }
-        },
-        'Appended.json': {"processed_ids": [], "patterns": {}}
+# --------- API ROUTES ---------
+@app.get("/")
+def root():
+    """Root endpoint for the MMTA Backend."""
+    return {"message": "MMTA Backend V9 - Manual Pattern Learning + User Summary"}
+
+@app.post("/analyze")
+def analyze_sms(payload: SMSPayload):
+    """
+    Analyzes a list of SMS messages for a given user, updates their summary,
+    and provides financial advice.
+    """
+    results = [analyze_message(msg, payload.user_id) for msg in payload.messages]
+    summary = update_user_summary(payload.user_id)
+    return {
+        "analysis": results,
+        "summary": summary,
+        "advice": get_manual_advice(payload.user_id), # Using manual advice
+        "total_messages_processed": len(payload.messages)
     }
-    
-    for filename, default_content in required_files.items():
-        path = f'data/{filename}'
-        if not os.path.exists(path):
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(default_content, f, indent=2)
-    
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+@app.get("/patterns")
+def get_all_patterns():
+    """Returns all loaded patterns."""
+    return {"patterns": patterns}
+
+@app.get("/service-names")
+def get_service_names():
+    """Returns a list of all detected service names from patterns.json."""
+    data = load_json(PATTERNS_FILE)
+    return {"service_names": list(data.keys())}
+
+@app.get("/service-names/{service_name}")
+def get_service_patterns(service_name: str):
+    """Returns patterns for a specific service name."""
+    data = load_json(PATTERNS_FILE)
+    if service_name not in data:
+        raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found.")
+    return {service_name: data[service_name]}
+
+@app.get("/user-summary/{user_id}")
+def get_user_summary(user_id: str):
+    """Returns the spending summary for a specific user."""
+    summary_path = os.path.join(USER_DATA_DIR, user_id, "summary.json")
+    if not os.path.exists(summary_path):
+        raise HTTPException(status_code=404, detail="User summary not found.")
+    with open(summary_path, "r", encoding="utf-8") as f:
+        return json.load(f) 
+
+@app.get("/user-transactions/{user_id}")
+def get_user_transactions(user_id: str): 
+    """Returns all stored transactions for a specific user."""
+    transactions = load_transactions(user_id)
+    if not transactions:
+        raise HTTPException(status_code=404, detail="No transactions found for this user.")
+    return {"transactions": transactions}
+
+@app.post("/user-transactions/{user_id}")
+def save_user_transaction(user_id: str, transaction: Dict[str, Any]):
+    """Manually saves a transaction for a specific user."""
+    if not transaction:
+        raise HTTPException(status_code=400, detail="Transaction data is required.")
+    save_transaction(user_id, transaction)
+    return {"status": "success", "message": "Transaction saved successfully."}
+
+@app.get("/user-advice/{user_id}")
+def get_user_advice(user_id: str):
+    """Returns financial advice for a specific user."""
+    advice = get_manual_advice(user_id) # Calling the manual advice function
+    return {"advice": advice}
